@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exported Data Inspector</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --bg: #f5f5f7; --surface: #fff; --text: #1d1d1f; --muted: #65656b;
+    --line: #e5e5ea; --accent: #006edb; --focus: #147ce5; --error: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111215; --surface: #1c1d21; --text: #f5f5f7; --muted: #a0a0a8;
+      --line: #35363b; --accent: #76b6ff; --focus: #76b6ff; --error: #ff9b91; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); }
+  button, select, input { font: inherit; }
+  button, select { min-height: 38px; }
+  button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible {
+    outline: 3px solid var(--focus); outline-offset: 2px;
+  }
+  canvas:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  .app { width: min(1880px, calc(100% - 40px)); margin: 0 auto; padding: 24px 0 32px; }
+  .masthead { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 15px; }
+  .eyebrow { color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 4px; }
+  h1 { font-size: 26px; letter-spacing: -.03em; line-height: 1.2; margin: 0; }
+  h2 { font-size: 18px; letter-spacing: -.02em; margin: 0; }
+  h3 { font-size: 16px; margin: 0; }
+  .field { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+  select { max-width: 330px; padding: 6px 34px 6px 12px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--surface); color: var(--text); cursor: pointer; }
+  .episode-browser { display: grid; gap: 6px; min-width: 0; }
+  .episode-browser .field { flex-wrap: wrap; }
+  #episode { width: min(330px, 42vw); }
+  .episode-pages { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .episode-pages button { min-height: 28px; padding: 3px 8px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+  .episode-pages button:disabled { opacity: .4; cursor: default; }
+  .task { display: flex; align-items: baseline; gap: 11px; margin: 0 0 17px; min-height: 24px; }
+  .task span { flex: none; color: var(--muted); font-size: 13px; }
+  .task strong { font-size: 16px; font-weight: 600; line-height: 1.4; }
+  .transport { display: flex; align-items: center; gap: 16px; padding: 13px 16px; margin-bottom: 20px;
+    border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+  #play { flex: none; padding: 7px 16px; border: 0; border-radius: 9px; background: var(--accent); color: #fff;
+    font-weight: 600; cursor: pointer; }
+  @media (prefers-color-scheme: dark) { #play { color: #101b29; } }
+  .scrub { flex: 1; min-width: 0; }
+  #timeline { width: 100%; margin: 2px 0 5px; accent-color: var(--accent); cursor: pointer; }
+  .scrub-label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  #time { font-variant-numeric: tabular-nums; }
+  .workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+  .surface { min-width: 0; padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+  .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-bottom: 14px; }
+  #camera-name { color: var(--muted); font-size: 14px; font-weight: 500; margin-left: 8px; }
+  .camera { display: block; width: 100%; padding: 0; text-align: left; border: 0; background: transparent; color: inherit; }
+  .camera img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #0b1018; border-radius: 9px; }
+  .camera.primary { cursor: default; }
+  .camera.primary img { max-height: 50vh; }
+  .camera.primary:disabled { opacity: 1; color: inherit; }
+  .camera-title { display: block; margin: 7px 0 0; font-weight: 600; }
+  .camera.primary .camera-title { display: none; }
+  .camera .detail { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .camera.secondary .detail { display: none; }
+  .filmstrip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; }
+  .filmstrip:empty { display: none; }
+  .camera.secondary { cursor: pointer; border-radius: 10px; }
+  .camera.secondary img { border: 2px solid transparent; }
+  .camera.secondary:hover img { border-color: var(--accent); }
+  .media-grid { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(380px, .92fr); gap: 14px; min-height: 0; }
+  .video-panel, .curve-panel { min-width: 0; min-height: 0; }
+  .curve-panel { display: flex; flex-direction: column; padding-left: 14px; border-left: 1px solid var(--line); }
+  .curve-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  #curve-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .curve-chart { flex: 1; min-height: 170px; }
+  .curve-chart canvas { display: block; width: 100%; height: 100%; min-height: 170px; border-radius: 9px;
+    touch-action: none; cursor: crosshair; --chart-bg: #0c1520; --chart-grid: #24374a; --chart-text: #9eafc2; }
+  .curve-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 12px;
+    max-height: 112px; margin-top: 8px; overflow-y: auto; }
+  .curve-group { min-width: 0; }
+  .curve-group-title, .curve-option { display: flex; align-items: center; cursor: pointer; }
+  .curve-group-title { gap: 5px; margin-bottom: 3px; font-size: 12px; font-weight: 650; }
+  .curve-options { display: flex; gap: 3px 8px; flex-wrap: wrap; }
+  .curve-option { gap: 4px; color: var(--muted); font-size: 11px; }
+  .curve-option input, .curve-group-title input { margin: 0; accent-color: var(--accent); }
+  .curve-swatch { width: 9px; height: 9px; border-radius: 2px; }
+  .poses { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .pose-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+  .quiet { border: 0; background: transparent; color: var(--accent); font-size: 13px; font-weight: 600; cursor: pointer; padding: 4px 6px; }
+  .pose-viewport { position: relative; }
+  .pose canvas { display: block; width: 100%; height: clamp(260px, 31vh, 350px); border-radius: 9px; touch-action: none; cursor: grab; }
+  .pose canvas:active { cursor: grabbing; }
+  .pose-empty { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #aabbd0; font-size: 14px; pointer-events: none; }
+  .pose-meta { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 8px; color: var(--muted);
+    font-size: 12px; font-variant-numeric: tabular-nums; }
+  #error { color: var(--error); margin: 0 0 12px; white-space: pre-wrap; }
+  #error:empty { display: none; }
+  [hidden] { display: none !important; }
+  .anomaly-review { position: relative; flex-shrink: 0; margin-bottom: 10px; padding: 10px 12px;
+    border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+  .anomaly-toolbar, .anomaly-nav, .anomaly-summary { display: flex; align-items: center; gap: 10px; }
+  .anomaly-toolbar { flex-wrap: wrap; gap: 6px 10px; }
+  .anomaly-toolbar > strong { font-size: 13px; }
+  .anomaly-nav { margin-left: auto; gap: 4px; }
+  .anomaly-toolbar button, .anomaly-toolbar summary { min-height: 28px; padding: 4px 8px;
+    border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
+  .anomaly-toolbar button:hover:not(:disabled), .anomaly-toolbar summary:hover { background: var(--bg); color: var(--text); }
+  .anomaly-toolbar button:disabled { opacity: .35; cursor: default; }
+  .anomaly-toolbar summary { list-style: none; }
+  .anomaly-toolbar summary::-webkit-details-marker { display: none; }
+  .anomaly-toolbar summary::after { content: ' ▾'; }
+  .anomaly-toolbar details[open] > summary { background: var(--bg); color: var(--accent); }
+  #anomaly-count { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .anomaly-popover { position: absolute; z-index: 5; top: 44px; right: 12px; left: 12px;
+    padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+    box-shadow: 0 10px 30px #0002; }
+  .anomaly-controls { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+  .anomaly-controls label { display: grid; flex: 1; min-width: 120px; gap: 5px; color: var(--muted); font-size: 12px; }
+  .anomaly-controls select { width: 100%; max-width: none; min-height: 32px; }
+  #anomaly-record { width: 100%; max-width: none; padding: 4px; font-size: 13px; }
+  #anomaly-record option { padding: 7px 8px; }
+  .anomaly-popover p { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
+  .anomaly-summary { min-width: 0; margin-top: 5px; gap: 6px 16px; flex-wrap: wrap; }
+  #anomaly-title { font-size: 15px; overflow-wrap: anywhere; }
+  #anomaly-timing { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #anomaly-details { margin-left: auto; }
+  #anomaly-details summary { color: var(--muted); font-size: 11px; cursor: pointer; }
+  #anomaly-detail { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 ui-monospace, monospace; }
+  #anomaly-filters[data-active="true"] > summary { color: var(--accent); }
+  #anomaly-marks:empty { display: none; }
+  #anomaly-marks { margin: 4px 4px 0; }
+  .anomaly-lane { position: relative; height: 16px; }
+  .anomaly-lane > span { position: absolute; font-size: 10px; opacity: .7; pointer-events: none; }
+  .anomaly-track { position: absolute; inset: 0; }
+  .anomaly-mark { position: absolute; top: 2px; height: 12px; min-height: 0; min-width: 4px;
+    padding: 0; border: 1px solid var(--error); border-radius: 3px; background: var(--error); opacity: .25; cursor: pointer; }
+  .anomaly-mark:hover { opacity: .65; }
+  .anomaly-mark.point { transform: translateX(-50%); }
+  .anomaly-mark[aria-pressed="true"] { opacity: 1; outline: 2px solid var(--text); z-index: 1; }
+  .anomalous { color: var(--error); font-weight: 700; }
+  @media (min-width: 681px) {
+    .app { height: 100dvh; min-height: 600px; display: flex; flex-direction: column; padding: 12px 0; }
+    .masthead, .task, .transport { flex-shrink: 0; margin-bottom: 10px; }
+    .task { max-height: 3lh; overflow-y: auto; }
+    .transport { padding: 8px 12px; }
+    .workspace { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1.18fr) minmax(0, .82fr); gap: 12px; align-items: stretch; }
+    .surface { display: flex; flex-direction: column; min-height: 0; padding: 12px; }
+    .panel-heading { flex-shrink: 0; margin-bottom: 8px; }
+    .media-grid { flex: 1; }
+    .video-panel { display: flex; flex-direction: column; }
+    .video-content { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 9px; }
+    #primaryCamera { flex: 1; min-width: 0; min-height: 0; }
+    .camera.primary { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+    .camera.primary img { flex: 1; min-height: 0; height: 0; max-height: none; aspect-ratio: auto; }
+    .camera.primary .detail { flex-shrink: 0; margin-top: 4px; }
+    .filmstrip { display: flex; flex-direction: row; flex: 0 0 92px; gap: 10px; margin: 0; overflow-x: auto; overflow-y: hidden; }
+    .filmstrip:empty { display: none; }
+    .filmstrip .camera { flex: 0 0 138px; }
+    .filmstrip .camera img { height: 64px; aspect-ratio: auto; }
+    .camera-title { font-size: 12px; overflow-wrap: anywhere; margin-top: 4px; }
+    .poses { flex: 1; min-height: 0; }
+    .pose { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .pose-head { flex-shrink: 0; margin-bottom: 4px; }
+    .pose-viewport { flex: 1; min-height: 0; }
+    .pose canvas { position: absolute; inset: 0; height: 100%; }
+    .pose-meta { flex-shrink: 0; margin-top: 4px; }
+  }
+  @media (max-width: 1050px) { .media-grid { grid-template-columns: 1fr; } .curve-panel { min-height: 330px; padding: 14px 0 0;
+      border-left: 0; border-top: 1px solid var(--line); } }
+  @media (min-width: 681px) and (max-width: 1050px) { .app { height: auto; } .workspace { grid-template-rows: auto; }
+    .video-panel { min-height: 440px; } .poses { min-height: 320px; } }
+  @media (max-width: 680px) { .app { width: min(100% - 24px, 520px); padding-top: 18px; } .masthead { align-items: start; flex-direction: column; }
+    .episode-browser { width: 100%; } #episode { width: min(100%, 340px); }
+    .transport { gap: 10px; padding: 10px; } .surface { padding: 12px; }
+    .media-grid { grid-template-columns: 1fr; } .curve-controls { grid-template-columns: 1fr; }
+    .poses { grid-template-columns: 1fr; } .pose + .pose { border-top: 1px solid var(--line); padding-top: 16px; }
+    .filmstrip { display: flex; overflow-x: auto; } .filmstrip .camera { flex: 0 0 150px; } }
+</style>
+<div class="app">
+  <header class="masthead">
+    <div><p class="eyebrow">Robot Data Hub</p><h1>Exported Data Inspector</h1></div>
+    <div class="episode-browser">
+      <label class="field" for="episode">Episode <select id="episode" disabled></select></label>
+      <div class="episode-pages">
+        <button id="episode-prev" type="button" aria-label="Previous episode page" disabled>← Previous</button>
+        <span id="episode-count" role="status">Loading episodes…</span>
+        <button id="episode-next" type="button" aria-label="Next episode page" disabled>Next →</button>
+      </div>
+    </div>
+  </header>
+  <p class="task"><span>Current instruction</span><strong id="instruction" aria-live="polite">Loading…</strong></p>
+  <section id="anomaly-review" class="anomaly-review" aria-label="Anomaly review" hidden>
+    <div class="anomaly-toolbar">
+      <strong>Anomalies</strong>
+      <details id="anomaly-list">
+        <summary aria-label="Choose an anomaly"><span id="anomaly-count" aria-live="polite"></span></summary>
+        <div class="anomaly-popover">
+          <p id="anomaly-list-caption">Choose a record to jump to its start time.</p>
+          <select id="anomaly-record" size="6" aria-label="Anomaly record" aria-describedby="anomaly-list-caption"></select>
+        </div>
+      </details>
+      <div class="anomaly-nav">
+        <button id="anomaly-prev" type="button">← Previous</button>
+        <button id="anomaly-next" type="button">Next →</button>
+      </div>
+      <details id="anomaly-filters">
+        <summary id="anomaly-filter-label">Filters</summary>
+        <div class="anomaly-popover anomaly-controls">
+          <label>Episode<select id="anomaly-episode" aria-label="Filter anomalies by episode"></select></label>
+          <label>Stream<select id="anomaly-stream" aria-label="Filter anomalies by stream"></select></label>
+          <label>Reason<select id="anomaly-reason" aria-label="Filter anomalies by reason"></select></label>
+          <button id="anomaly-reset" type="button">Clear filters</button>
+        </div>
+      </details>
+    </div>
+    <div class="anomaly-summary" aria-live="polite">
+      <strong id="anomaly-title"></strong>
+      <span id="anomaly-timing"></span>
+      <details id="anomaly-details" hidden>
+        <summary>Details</summary>
+        <div class="anomaly-popover"><p id="anomaly-detail"></p></div>
+      </details>
+    </div>
+  </section>
+  <div class="transport">
+    <button id="play" type="button" aria-label="Play">▶ Play</button>
+    <div class="scrub">
+      <input id="timeline" aria-label="Episode timeline" type="range" min="0" max="1000" value="0">
+      <div id="anomaly-marks" aria-label="Anomalies on the episode timeline"></div>
+      <div class="scrub-label"><span>Timeline</span><output id="time">0.000 s</output></div>
+    </div>
+  </div>
+  <p id="error" role="alert"></p>
+  <main class="workspace">
+    <section class="surface" aria-label="Video and state curves">
+      <div class="media-grid">
+        <section class="video-panel" aria-labelledby="video-title">
+          <div class="panel-heading"><h2 id="video-title">Video <span id="camera-name"></span></h2></div>
+          <div class="video-content"><div id="primaryCamera"></div><div id="otherCameras" class="filmstrip"></div></div>
+        </section>
+        <section class="curve-panel" aria-labelledby="curve-title">
+          <div class="panel-heading curve-heading"><h2 id="curve-title">State curves</h2><output id="curve-time"></output></div>
+          <div class="curve-chart"><canvas id="curve-canvas" aria-label="EEF and gripper state curves"></canvas></div>
+          <div id="curve-controls" class="curve-controls" aria-label="Curve visibility controls"></div>
+        </section>
+      </div>
+    </section>
+    <section class="surface" aria-labelledby="state-title">
+      <div class="panel-heading"><h2 id="state-title">End-effector poses</h2></div>
+      <div class="poses" id="poses"></div>
+    </section>
+  </main>
+</div>
+<script>
+// Static module failures happen before the module's own error handlers can run.
+window.addEventListener('error', event => {
+  if (!(event.target instanceof HTMLScriptElement) && !event.message) return;
+  document.getElementById('instruction').textContent = 'Viewer initialization failed';
+  document.getElementById('episode-count').textContent = 'Viewer initialization failed';
+  document.getElementById('error').textContent = event.message ||
+    'Unable to load the viewer JavaScript modules. Check the viewer URL and network connection.';
+}, true);
+</script>
+<script type="module">
+import {Pose3D} from './pose3d.js';
+import {StateCurves} from './state_curves.js';
+import {adjacentSampleTime, sampleIndex} from './navigation.js';
+import {AnomalyReview} from './anomalies.js';
+import {EpisodeBrowser} from './episodes.js';
+const $ = id => document.getElementById(id);
+let data = null, currentNs = 0, playing = false, lastTick = 0, generation = 0;
+let primaryCameraId = null, secondaryTimer = null, lastSecondaryNs = null;
+let poseViews = {}, cameraCards = {};
+const seconds = ns => (ns / 1e9).toFixed(2) + ' s';
+const episodeBrowser = new EpisodeBrowser({select: $('episode'),
+  previous: $('episode-prev'), next: $('episode-next'), status: $('episode-count')}, id => load(id));
+const review = new AnomalyReview($('anomaly-review'), $('anomaly-marks'), record => {
+  setPlaying(false);
+  episodeBrowser.setSelected(record.episode_id);
+  if (data?.episode_id === record.episode_id) { currentNs = record.start_ns; render(); }
+  else load(record.episode_id, record.start_ns);
+});
+const curveView = new StateCurves($('curve-canvas'), $('curve-controls'), $('curve-time'), value => {
+  if (!data) return;
+  setPlaying(false); currentNs = value; render();
+});
+function setPlaying(value) {
+  playing = value; lastTick = 0;
+  $('play').textContent = playing ? '❚❚ Pause' : '▶ Play';
+  $('play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+function frameUrl(id, camera, index, width) {
+  return `./api/frame?id=${encodeURIComponent(id)}&camera=${encodeURIComponent(camera)}&index=${index}&width=${width}`;
+}
+// Generic camera ordering: prefer overhead/global views, push wrist/fisheye back.
+// Root-word regexes avoid depending on any dataset's specific naming, so the
+// cameras that look most global are treated as the best primary view.
+const CAMERA_HINTS = [
+  [/top|overhead|bird|global|high/, 100],
+  [/head/, 50], [/front/, 20],
+  [/wrist|hand|gripper/, -100], [/fisheye/, -20],
+];
+function orderedCameras(ids) {
+  const score = id => CAMERA_HINTS.reduce((sum, [re, weight]) => sum + (re.test(id) ? weight : 0), 0);
+  return [...ids].sort((a, b) => score(b) - score(a) || a.localeCompare(b));
+}
+function setPrimaryCamera(camera) {
+  primaryCameraId = camera;
+  lastSecondaryNs = null;
+  if (secondaryTimer !== null) { clearTimeout(secondaryTimer); secondaryTimer = null; }
+  $('camera-name').textContent = camera;
+  for (const [id, card] of Object.entries(cameraCards)) {
+    card.classList.toggle('primary', id === camera);
+    card.classList.toggle('secondary', id !== camera);
+    card.setAttribute('aria-current', id === camera ? 'true' : 'false');
+    (id === camera ? $('primaryCamera') : $('otherCameras')).append(card);
+  }
+}
+function requestCameraFrame(camera, index) {
+  const img = document.getElementById('img-' + camera);
+  if (!img) return;
+  const width = Math.max(160, Math.min(1600, Math.ceil(img.clientWidth * (window.devicePixelRatio || 1))));
+  const request = `${index}:${width}`;
+  if (index < 0) {
+    if (img.dataset.request) img.removeAttribute('src');
+    img.dataset.request = ''; img.dataset.loading = '';
+  } else if (img.dataset.request !== request && img.dataset.loading !== '1') {
+    // Coalesce scrubs: finish the in-flight decode, then img.onload renders the latest time.
+    img.dataset.loading = '1'; img.dataset.request = request;
+    img.src = frameUrl(data.episode_id, camera, index, width);
+  }
+}
+function renderSecondaryCameras() {
+  if (!data) return;
+  for (const [camera, stream] of Object.entries(data.cameras)) {
+    if (camera === primaryCameraId) continue;
+    requestCameraFrame(camera, sampleIndex(stream.times, currentNs));
+  }
+}
+function scheduleSecondaryCameras() {
+  if (!data) return;
+  if (playing) {
+    if (lastSecondaryNs !== null && Math.abs(currentNs - lastSecondaryNs) < 1e9) return;
+    lastSecondaryNs = currentNs;
+    renderSecondaryCameras();
+    return;
+  }
+  if (secondaryTimer !== null) clearTimeout(secondaryTimer);
+  const episode = data;
+  secondaryTimer = setTimeout(() => {
+    secondaryTimer = null;
+    if (data !== episode || playing) return;
+    lastSecondaryNs = currentNs;
+    renderSecondaryCameras();
+  }, 150);
+}
+function render() {
+  if (!data) return;
+  const end = Math.max(data.end_ns, 1);
+  $('timeline').value = Math.round(currentNs / end * 1000);
+  $('time').textContent = seconds(currentNs) + ' / ' + seconds(data.end_ns);
+  curveView.setCurrentTime(currentNs);
+  const active = data.instructions.find(ins => ins.start_ns <= currentNs &&
+    (currentNs < ins.end_ns || currentNs === data.end_ns && ins.end_ns === data.end_ns));
+  const instruction = active ? active.text : 'No instruction for this time range';
+  if ($('instruction').textContent !== instruction) $('instruction').textContent = instruction;
+  for (const [camera, stream] of Object.entries(data.cameras)) {
+    const index = sampleIndex(stream.times, currentNs);
+    document.getElementById('meta-' + camera).textContent = index < 0
+      ? 'Waiting for first frame' : `Sampled at ${seconds(stream.times[index])}`;
+    if (camera === primaryCameraId) requestCameraFrame(camera, index);
+  }
+  scheduleSecondaryCameras();
+  const activeStreams = review.activeStreams(currentNs);
+  for (const side of ['left', 'right']) {
+    const pose = data.streams[side + '_eef'], gripper = data.streams[side + '_gripper'];
+    const poseIndex = sampleIndex(pose.times, currentNs);
+    const gripperIndex = sampleIndex(gripper.times, currentNs);
+    const openness = gripperIndex < 0 ? null : gripper.values[gripperIndex];
+    poseViews[side].setSample(poseIndex, openness);
+    document.getElementById('meta-' + side).textContent = poseIndex < 0
+      ? 'Waiting for first TCP sample' : `Sampled at ${seconds(pose.times[poseIndex])}`;
+    document.getElementById('gripper-' + side).textContent = openness === null
+      ? 'Gripper: waiting for first sample' : `Gripper opening ${Math.round(openness * 100)}%`;
+    document.getElementById('meta-' + side).classList.toggle('anomalous', activeStreams.has(side + '_eef'));
+    document.getElementById('gripper-' + side).classList.toggle('anomalous', activeStreams.has(side + '_gripper'));
+  }
+}
+function setup(episode, startNs = 0) {
+  Object.values(poseViews).forEach(view => view.destroy());
+  if (secondaryTimer !== null) clearTimeout(secondaryTimer);
+  poseViews = {}; cameraCards = {}; primaryCameraId = null; secondaryTimer = null; lastSecondaryNs = null;
+  data = episode; currentNs = startNs; setPlaying(false);
+  curveView.setEpisode(episode);
+  review.setEpisode(episode);
+  $('primaryCamera').replaceChildren(); $('otherCameras').replaceChildren(); $('poses').replaceChildren();
+  const cameras = orderedCameras(Object.keys(data.cameras));
+  for (const camera of cameras) {
+    const card = document.createElement('button'); card.type = 'button'; card.className = 'camera';
+    card.dataset.camera = camera;
+    card.title = 'Focus here and use Left/Right arrows to step this camera stream';
+    card.setAttribute('aria-label', `Switch to ${camera} camera`);
+    const img = document.createElement('img'); img.id = 'img-' + camera; img.alt = camera + ' current frame';
+    img.onload = () => {
+      if (!img.isConnected || !img.dataset.request) return;
+      img.dataset.loading = ''; render();
+    };
+    img.onerror = () => {
+      if (!img.isConnected || !img.dataset.request) return;
+      img.dataset.loading = '';
+      if (camera === primaryCameraId) {
+        setPlaying(false);
+        $('error').textContent = `Failed to decode the video frame for ${camera}; check PyAV and Pillow.`;
+      }
+    };
+    const title = document.createElement('span'); title.className = 'camera-title'; title.textContent = camera;
+    const detail = document.createElement('span'); detail.id = 'meta-' + camera; detail.className = 'detail';
+    card.append(img, title, detail);
+    card.addEventListener('click', () => { setPrimaryCamera(camera); render(); });
+    cameraCards[camera] = card;
+  }
+  setPrimaryCamera(cameras[0]);
+  for (const side of ['left', 'right']) {
+    const card = document.createElement('section'); card.className = 'pose';
+    const head = document.createElement('div'); head.className = 'pose-head';
+    const title = document.createElement('h3'); title.textContent = side === 'left' ? 'Left arm' : 'Right arm';
+    const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'quiet'; reset.textContent = 'Reset view';
+    head.append(title, reset);
+    const canvas = document.createElement('canvas'); canvas.setAttribute('aria-label', title.textContent + ' 3D pose');
+    const viewport = document.createElement('div'); viewport.className = 'pose-viewport'; viewport.append(canvas);
+    const meta = document.createElement('div'); meta.className = 'pose-meta';
+    const time = document.createElement('span'); time.id = 'meta-' + side;
+    const gripper = document.createElement('span'); gripper.id = 'gripper-' + side;
+    meta.append(time, gripper); card.append(head, viewport, meta); $('poses').append(card);
+    poseViews[side] = new Pose3D(canvas, data.streams[side + '_eef'], side);
+    reset.addEventListener('click', () => poseViews[side].reset());
+  }
+  render();
+}
+async function load(id, startNs = 0) {
+  const token = ++generation;
+  setPlaying(false);
+  data = null;
+  $('play').disabled = true; $('timeline').disabled = true;
+  $('error').textContent = '';
+  $('instruction').textContent = 'Loading…';
+  try {
+    const res = await fetch('./api/episode?id=' + encodeURIComponent(id));
+    if (!res.ok) throw new Error(await res.text());
+    const episode = await res.json();
+    if (token === generation) {
+      setup(episode, startNs);
+      $('play').disabled = false; $('timeline').disabled = false;
+    }
+  } catch (error) {
+    if (token === generation) {
+      $('instruction').textContent = 'Failed to load episode';
+      $('error').textContent = String(error);
+    }
+  }
+}
+function tick(now) {
+  if (playing && data) {
+    const primaryImage = primaryCameraId && document.getElementById('img-' + primaryCameraId);
+    const buffering = primaryImage?.dataset.loading === '1';
+    if (!buffering && lastTick) currentNs = Math.min(data.end_ns, currentNs + (now - lastTick) * 1e6);
+    if (currentNs >= data.end_ns) setPlaying(false);
+    render();
+  }
+  lastTick = now; requestAnimationFrame(tick);
+}
+$('timeline').addEventListener('input', () => {
+  if (data) { currentNs = Number($('timeline').value) / 1000 * data.end_ns; render(); }
+});
+$('play').addEventListener('click', () => {
+  if (!data) return;
+  if (currentNs >= data.end_ns) currentNs = 0;
+  setPlaying(!playing);
+  render();
+});
+document.addEventListener('keydown', event => {
+  if (!data || !['ArrowLeft', 'ArrowRight'].includes(event.key) ||
+      event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  const target = event.target;
+  let times = null;
+  const cameraCard = target.closest?.('.camera');
+  if (cameraCard) {
+    times = data.cameras[cameraCard.dataset.camera]?.times;
+  } else if (target.closest?.('.video-panel')) {
+    times = data.cameras[primaryCameraId]?.times;
+  } else if (target.closest?.('.curve-panel')) {
+    times = data.streams[curveView.stepStreamName()]?.times;
+  }
+  if (!times?.length) return;
+  event.preventDefault();
+  setPlaying(false);
+  currentNs = adjacentSampleTime(times, currentNs, event.key === 'ArrowLeft' ? -1 : 1);
+  render();
+});
+episodeBrowser.initialize().then(dataset => {
+  if (!dataset) return;
+  review.setReport(dataset.anomalies ?? null);
+  load(dataset.episodes[0]);
+}).catch(error => {
+  $('instruction').textContent = 'Failed to load episode list';
+  $('episode-count').textContent = 'Failed to load episodes';
+  $('error').textContent = String(error);
+});
+requestAnimationFrame(tick);
+</script>
+</html>

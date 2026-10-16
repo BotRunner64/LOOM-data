@@ -1,0 +1,30 @@
+[project]
+name = "robot-data-hub"
+version = "0.1.0"
+description = "Robot dataset selection and download tools"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "av>=18.1",
+    "mcap>=1.2",
+    "mcap-protobuf-support>=0.5",
+    "numpy>=1.24",
+    "h5py>=3.10",
+    "huggingface-hub>=1.0,<2.0",
+    "httpx[socks]>=0.28.1,<1.0",
+    "modelscope>=1.40.1,<2.0",
+    "pyarrow>=15",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+models = ["numpy>=1.24"]
+model-preview = ["numpy>=1.24", "mujoco>=3.3,<4"]
+viewer = ["pillow>=10"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
