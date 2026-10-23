@@ -203,7 +203,6 @@ class DetectionTests(unittest.TestCase):
         signal = np.arange(201) == 100
         data = stream(times, angles=170+40*signal)
         fixed = np.array([[0., 0., 1.], [1., 0., 0.], [0., 1., 0.]])
-        data.values[:, 6:9] = [0., 0., 1.]
         data.values[:, 3:6] = data.values[:, 3:6] @ fixed.T
         data.values[:, 6:9] = data.values[:, 6:9] @ fixed.T
         data.values[:, 9:12] = data.values[:, 9:12] @ fixed.T

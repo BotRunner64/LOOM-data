@@ -8,6 +8,22 @@
 - [10Kh-RealOmin-OpenData](https://huggingface.co/datasets/genrobot2025/10Kh-RealOmin-OpenData)
 - [AgiBot World Beta](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Beta)
 
+## 环境安装
+
+在项目根目录创建并激活 conda 环境：
+
+```bash
+conda env create -f environment.yml
+conda activate loom-data
+```
+
+环境使用 Python 3.11，并以可编辑模式安装项目及 viewer、机器人模型预览依赖。
+Python 依赖统一维护在 `pyproject.toml` 中。环境创建后，如需同步依赖，在项目根目录运行：
+
+```bash
+python -m pip install -e '.[viewer,model-preview]'
+```
+
 ## 项目组织原则
 
 数据清理工作拆成四类相互独立的产物，各司其职，互不混用：
