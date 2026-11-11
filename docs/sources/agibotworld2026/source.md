@@ -16,12 +16,12 @@
 转换链（`T_A_B` 将 B 系映到 A 系）：
 
 ```text
-T_fixed_tcp = T_fixed_base · T_base_arm_base(waist) · T_arm_base_flange(source) · T_flange_tcp
+T_fixed_eef = T_fixed_base · T_base_arm_base(waist) · T_arm_base_flange(source) · T_flange_eef
 ```
 
 本地 `crsB + omnipicker` 模型仅用于 `base_link → arm_base_link` 腰部链。其手臂长度与源末端记录不相容，不能用它重算双臂末端；`arm_base_link` 随腰部运动，也不能直接作为导出的固定参考系。
 
-规范轴在源法兰系中取 `X_tcp=+Z_flange`、`Z_tcp=+X_flange`（腕部相机安装侧，即掌背侧）、`Y_tcp=-Y_flange`。因此 `R_flange_tcp` 的列为：
+规范轴在源法兰系中取 `X_eef=+Z_flange`、`Z_eef=+X_flange`（腕部相机安装侧，即掌背侧）、`Y_eef=-Y_flange`。因此 `R_flange_eef` 的列为：
 
 ```text
 [[0,  0, 1],
@@ -29,7 +29,9 @@ T_fixed_tcp = T_fixed_base · T_base_arm_base(waist) · T_arm_base_flange(source
  [1,  0, 0]]
 ```
 
-**TCP 尚未取得该批 G2 实机的官方标定。** 默认平移暂取 `[0, 0, 0.207056] m`，来自[官方公开 G1_120s 模型的 CRT120S 长指夹爪几何](https://github.com/AgibotTech/genie_sim/blob/6ca11c7593ecf6b7dae58c28fd19f4a789a0dd46/source/geniesim_benchmark/src/geniesim_benchmark/app/robot_cfg/G1_120s/G1_120s.urdf)：零位两侧指垫 link 原点的中点，轴向长度为 `0.10644 + 0.0129 + 0.04341 + 0.044306`。视频中的长指外形及相机投影支持用它作预览估计，但源 `g2a` 元数据没有确认夹爪型号、安装变换和实机 TCP，不能把这个值视为精确物理标定。固定 TCP 不随开合改变；得到实机标定后应使用 `--tcp-offset X Y Z` 重导。当前数据可用于检查运动，精确 TCP 位置及由它计算的平移 delta 仍有此项不确定性。
+EEF 原点采用源法兰的安装基准，`p_flange_eef = [0,0,0] m`；保留上述工具轴映射。
+不再加入长指指垫中心的 `0.207056 m` 几何偏移。源法兰及工具安装的实机外参仍需核对，
+可用 `--eef-offset X Y Z` 覆盖安装接口在源法兰中的坐标；更换指尖不改变此基准。
 
 本地 `task_3401/399093_399454.tar.gz` 将底盘位置与姿态声明为 `dimensions: 0, indices: []`，即整个归档的 14 集都没有底盘位姿记录。该归档共 38,345 帧的 `action/robot/velocity` 两维全部为 0；结合这一归档为原地操作的确认，转换时将底盘视为不移动，使用固定底盘参考系。脚本逐集校验速度命令确实为零；其它有底盘位姿的归档照常使用实测位姿。若未来遇到缺少位姿且底盘命令非零的归档，转换会报错。
 

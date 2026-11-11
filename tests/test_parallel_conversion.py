@@ -77,7 +77,7 @@ class HifiShardTests(unittest.TestCase):
             source, output = root / 'raw', root / 'out'
             hifi_shard(source)
             hifi_shard(source, chunk=1)
-            config = make_config('hifi_umi', source)
+            config = make_config('hifi_umi', source, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             store = parallel.prepare(config, output)
             self.assertEqual(len(store.plan['tasks']), 2)
             self.assertEqual(len(store.ids), 4)
@@ -117,7 +117,7 @@ class HifiShardTests(unittest.TestCase):
             root = Path(directory)
             hifi_shard(root / 'raw')
             hifi_shard(root / 'raw', chunk=1)
-            config = make_config('hifi_umi', root / 'raw', limit_episodes=3)
+            config = make_config('hifi_umi', root / 'raw', limit_episodes=3, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             store = parallel.prepare(config, root / 'out')
             self.assertEqual([len(t['episode_ids']) for t in store.plan['tasks']], [2, 1])
             for rank in range(2):
@@ -138,7 +138,7 @@ class ResumeTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source, self.output = self.root / 'raw', self.root / 'export'
         hifi_source(self.source)
-        self.config = make_config('hifi_umi', self.source)
+        self.config = make_config('hifi_umi', self.source, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
         self.store = parallel.prepare(self.config, self.output)
         self.episode_id = self.store.ids[0]
 
@@ -391,7 +391,7 @@ class ResumeTests(unittest.TestCase):
         add_hifi_episode(self.source, 8)
         output = self.root / 'processes'
         command = [sys.executable, '-m', 'scripts.convert.parallel', 'run', '--dataset', 'hifi_umi',
-                   '--input-dir', str(self.source), '--output-dir', str(output)]
+                   '--input-dir', str(self.source), '--output-dir', str(output), '--left-eef-offset', '0', '0', '0', '--right-eef-offset', '0', '0', '0']
         for count in (2, 3):
             result = subprocess.run([*command, '--workers', str(count)], cwd=parallel.ROOT,
                                     capture_output=True, text=True, timeout=90, check=False)
@@ -500,7 +500,7 @@ with patch.object(parallel, 'atomic_json', side_effect=committed_record):
         add_hifi_episode(self.source, 8)
         output = self.root / 'external_launcher'
         prepare_args = ['prepare', '--dataset', 'hifi_umi', '--input-dir', str(self.source),
-                        '--output-dir', str(output)]
+                        '--output-dir', str(output), '--left-eef-offset', '0', '0', '0', '--right-eef-offset', '0', '0', '0']
 
         def cli(args, rank=None, count=None):
             env = dict(os.environ)

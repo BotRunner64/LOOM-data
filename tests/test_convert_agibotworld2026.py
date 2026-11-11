@@ -97,6 +97,16 @@ class AgibotWorld2026PoseTests(unittest.TestCase):
         np.testing.assert_array_equal(self.fk.axes[:, 1], np.cross(self.fk.axes[:, 2], self.fk.axes[:, 0]))
         self.assertAlmostEqual(np.linalg.det(self.fk.axes), 1)
 
+    def test_origin_stays_at_recorded_flange_without_finger_length(self):
+        from scripts.robot.kinematics import fk_poses
+        for sample in self.samples:
+            state, indices = self.pack(sample)
+            waist = dict(zip((f'body_joint{i}' for i in range(1, 6)), sample['state/waist/position']))
+            torso = fk_poses(self.fk.robot, waist)['arm_base_link']
+            for i, pose in enumerate(self.fk.poses(state, indices, True)):
+                flange = np.asarray(sample['state/end/arm_position']).reshape(2, 3)[i]
+                np.testing.assert_allclose(pose[:3], torso[:3, :3] @ flange + torso[:3, 3], atol=1e-12)
+
     def test_recorded_wrist_cameras_are_rigidly_attached_to_exported_tools(self):
         # Real source rows with independently recorded wrist extrinsics. Wrong
         # arm geometry, torso omission, frame order or quaternion order break

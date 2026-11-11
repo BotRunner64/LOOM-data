@@ -191,11 +191,11 @@ class MolmoAct2Tests(unittest.TestCase):
                 self.assertEqual(poses['timestamp_ns'].to_pylist(), times)
                 self.assertEqual(poses.schema.field('pose').type, pa.list_(pa.float64(), 12))
                 self.assertFalse(poses.schema.field('pose').nullable)
-                # Independent expected FK: remove world mounting and apply TCP/axes at wrist.
+                # Independent expected FK: remove world mounting and apply contract axes at the mounting origin.
                 q = source['observation.state'][0][offset:offset + 6]
                 transforms = fk_poses(model, {f'arm_{side}_joint{i+1}': value for i, value in enumerate(q)})
                 wrist = np.linalg.inv(transforms[f'arm_{side}_base_link']) @ transforms[f'arm_{side}_link6']
-                expected = np.r_[wrist[:3, 3] + .1347 * wrist[:3, 2], wrist[:3, 2], wrist[:3, 0], wrist[:3, 1]]
+                expected = np.r_[wrist[:3, 3], wrist[:3, 2], wrist[:3, 0], wrist[:3, 1]]
                 np.testing.assert_allclose(poses['pose'][0].as_py(), expected, atol=1e-9)
                 gripper = pq.read_table(exported / 'state' / f'{side}_gripper.parquet')
                 self.assertEqual(gripper['timestamp_ns'].to_pylist(), times)

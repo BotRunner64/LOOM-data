@@ -83,7 +83,7 @@ Beta 样本的 40 路视频全部解码后也与本集行数一致。
 正好对应目标契约的整集终点（最后采样时刻），也兼容上游将整集终点写为 N 的形式。
 空白处使用 `task_name`，空的 `action_text` 不替代任务文本；重叠或越界的有效标注报错。
 
-## 固定参考系与 TCP
+## 固定参考系与 EEF 安装接口
 
 本次真实样本的法兰位姿已经包含腰部运动，参考系为源底盘 base，而非 `arm_base_link`。
 独立核对采用[官方 G1_120s URDF](https://github.com/AgibotTech/genie_sim/blob/6ca11c7593ecf6b7dae58c28fd19f4a789a0dd46/source/geniesim_benchmark/src/geniesim_benchmark/app/robot_cfg/G1_120s/G1_120s.urdf)
@@ -93,7 +93,7 @@ Beta 样本的 40 路视频全部解码后也与本集行数一致。
 不能再左乘一次腰部 FK，也不能套用 2026 的五关节腰部链。
 
 ```text
-T_fixed_tcp = T_odom_base(source) · T_base_flange(source) · T_flange_tcp
+T_fixed_eef = T_odom_base(source) · T_base_flange(source) · T_flange_eef
 ```
 
 有效 odom 位置和 xyzw 姿态照常使用。底盘位置与四元数同时全零时，参照 2026 的缺失标记规则，
@@ -107,8 +107,8 @@ T_fixed_tcp = T_odom_base(source) · T_base_flange(source) · T_flange_tcp
 183 集有效底盘样本中，未发现速度命令全零却存在明显底盘运动（平移超过 0.1 米或转角超过 10 度）的反例。
 这是抽样核验，不代表全量比例；恢复条件在转换时逐集检查。
 
-默认 TCP 平移为 `[0,0,0.207056] m`，采用公开 G1_120s 长指模型闭合指垫中心的几何估计，
-不是本次实机夹爪的官方 TCP 标定。接近方向在源法兰中为 +Z；
+EEF 原点采用源法兰的夹爪安装基准，平移为 `[0,0,0] m`，不再加入长指中心的
+`0.207056 m` 几何偏移。轴向保持不变：接近方向在源法兰中为 +Z；
 模型左夹爪的掌背取 +X，右夹爪因安装关节绕 Z 转 π 而取 -X。
 规范 X/Y/Z 列依次为：
 
@@ -117,9 +117,9 @@ left:  [[0, 0, 1], [0,-1,0], [1,0,0]]
 right: [[0, 0,-1], [0, 1,0], [1,0,0]]
 ```
 
-固定工具安装及 TCP 对真实批次的注册尚未取得官方外参。
-精确物理 TCP 使用 `--tcp-offset` 和左右 `--*-tool-rpy` 提供实机标定后重导；
-独立 FK 回归只验证法兰参考系，不验证这个工具几何估计。
+固定工具安装对真实批次的注册尚未取得官方外参。
+可使用 `--eef-offset` 和左右 `--*-tool-rpy` 提供安装接口的实机标定后重导；
+独立 FK 回归验证法兰参考系，不代表完成安装接口的实机标定。
 
 ## 实际夹爪方向和默认基准
 

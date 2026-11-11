@@ -117,6 +117,9 @@ def validate_plan(plan):
         raise StateError('Unsupported or damaged plan')
     if plan.get('id') != digest({k: v for k, v in plan.items() if k != 'id'}):
         raise StateError('Plan checksum mismatch')
+    from scripts.convert.export_common import EXPORT_CONTRACT_VERSION
+    if plan.get('config', {}).get('params', {}).get('export_contract_version') != EXPORT_CONTRACT_VERSION:
+        raise StateError('Incompatible export contract: old TCP plans require a new output and re-export')
     ids = []
     for task in plan['tasks']:
         if not task['episode_ids']:
@@ -595,7 +598,10 @@ def main():
         launch.add_argument('--limit', type=int, help='first N archives for AgiBot, first N episodes otherwise')
         launch.add_argument('--limit-episodes', type=int, help='first N candidate episodes globally, including legitimate skips')
         launch.add_argument('--robot-type', choices=('r1lite', 'r1pro'), help='Galaxea embodiment filter')
-        launch.add_argument('--tcp-offset', type=float, nargs=3, help='AgiBot/RealOmin TCP in source tool axes, metres')
+        launch.add_argument('--eef-offset', type=float, nargs=3, help='AgiBot/RealOmin mounting origin in source tool axes, metres')
+        for side in ('left', 'right'):
+            launch.add_argument(f'--{side}-eef-offset', type=float, nargs=3,
+                                help=f'HiFi-UMI {side} mounting origin in source virtual fingertip axes, metres; default: nominal [-0.12, 0, 0]')
         launch.add_argument('--tool-rpy', type=float, nargs=3, help='RealOmin contract tool RPY in source axes')
         launch.add_argument('--left-tool-rpy', type=float, nargs=3, help='Beta left contract tool RPY in source flange')
         launch.add_argument('--right-tool-rpy', type=float, nargs=3, help='Beta right contract tool RPY in source flange')
@@ -603,7 +609,7 @@ def main():
         launch.add_argument('--gripper-closed', type=float, help='RealOmin/Beta measured source value at full close')
         launch.add_argument('--instruction', help='RealOmin task text override')
         for kind in ('r1lite', 'r1pro'):
-            launch.add_argument(f'--{kind}-tcp-offset', type=float, nargs=3, help='Galaxea TCP offset in metres')
+            launch.add_argument(f'--{kind}-eef-offset', type=float, nargs=3, help='Galaxea mounting origin in source tool axes, metres')
         launch.add_argument('--gripper-open-rad', type=float, help='HiFi-UMI open angle')
         launch.add_argument('--gripper-closed-rad', type=float, help='HiFi-UMI closed angle')
     child = sub.add_parser('worker', help='process assigned tasks; caller launches with srun after prepare')

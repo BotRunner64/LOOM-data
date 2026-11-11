@@ -27,6 +27,7 @@ scripts/
 │   ├── parallel.py
 │   └── parallel_adapters.py
 ├── robot/      # 机器人模型工具（URDF 解析、FK、可视化、包校验）
+│   ├── realomin_mount.py # 根据厂商配套模型复算 V3 后端安装点
 │   ├── urdf_model.py
 │   ├── kinematics.py
 │   ├── yam.py
@@ -94,4 +95,4 @@ Beta 中间分片保存在输出目录下的 `.archives/`，提取后不将 dept
 转换入口为 `python scripts/convert/realomin.py` 与
 `python scripts/convert/agibotworld_beta.py`，默认分别输出到
 `dataset/processed/10Kh-RealOmin-OpenData/` 和 `dataset/processed/AgiBotWorld-Beta/`。
-TCP 几何估计及夹爪标定限制见对应的源契约与转换说明。
+安装接口原点映射及夹爪标定限制见对应的源契约与转换说明。

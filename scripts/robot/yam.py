@@ -1,4 +1,4 @@
-"""Shared YAM measured-joint FK and export-contract TCP convention."""
+"""Shared YAM measured-joint FK at the gripper mounting interface."""
 import json
 
 import numpy as np
@@ -17,7 +17,7 @@ class YamFK:
         self.arms = {}
         for side in ('left', 'right'):
             arm = manifest['arms'][side]
-            tip = arm['eef_candidates']['grasp']
+            tip = arm['eef_candidates']['tcp']
             base = arm['base_link'] if arm_local else manifest['base_link']
             chain, link = [], tip
             while link != base and link in parents:
@@ -25,12 +25,13 @@ class YamFK:
                 chain.append(joint)
                 link = joint.parent
             if len(arm['joints']) != 6 or {j.name for j in chain if j.type != 'fixed'} != set(arm['joints']):
-                raise ValueError('Expected six arm joints and a fixed base-to-grasp chain')
+                raise ValueError('Expected six arm joints and a fixed base-to-mount chain')
             if link != base:
-                raise ValueError('Grasp chain does not reach model base')
+                raise ValueError('Mount chain does not reach model base')
             self.arms[side] = (Robot(robot.name, (link, *(j.child for j in reversed(chain))),
                                     tuple(reversed(chain))), arm['joints'], tip)
-        # grasp axes: X=-Y_link6, Y=+X_link6, Z=+Z_link6.
+        # Model tcp site is at link6 (mount), with the same axes as grasp:
+        # X=-Y_link6, Y=+X_link6, Z=+Z_link6.
         # Contract EEF: +X=+Z_link6 (approach), +Z=+Y_link6 (back of hand),
         # +Y=+Z x +X=+X_link6.
         self.rotation = np.array([[0., 0., -1.], [0., 1., 0.], [1., 0., 0.]])

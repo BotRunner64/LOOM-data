@@ -89,14 +89,14 @@ class ExportTests(unittest.TestCase):
                          [{'start_ns': 0, 'end_ns': 300, 'text': 'new'}])
 
     @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
-    def test_fk_tcp_offset_and_axes(self):
+    def test_fk_mount_origin_and_axes(self):
         fk = script.YamFK(MODEL)
         robot = parse_urdf(MODEL / 'robot.urdf')
         for side in ('left', 'right'):
             q = [.2, -.3, .5, -.6, .4, .1]
             wrist = fk_poses(robot, {f'arm_{side}_joint{i+1}': value for i, value in enumerate(q)})[f'arm_{side}_link6']
             pose = fk.pose(side, q)
-            np.testing.assert_allclose(pose[:3], wrist[:3, 3] + wrist[:3, 2] * .1347, atol=1e-9)
+            np.testing.assert_allclose(pose[:3], wrist[:3, 3], atol=1e-9)
             np.testing.assert_allclose(pose[3:6], wrist[:3, 2], atol=1e-9)
             np.testing.assert_allclose(pose[6:9], wrist[:3, 0], atol=1e-9)
         with self.assertRaises(ValueError):

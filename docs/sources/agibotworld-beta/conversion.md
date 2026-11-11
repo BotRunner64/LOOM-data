@@ -35,10 +35,10 @@ HDF5 的整数纳秒 `timestamp` 用作四路 state 与各路 RGB 的采集时�
 其余实测底盘位姿保留，不修改源 HDF5，不添加腰部 FK。
 缺失位姿时速度命令非零、缺失或无效，位置非零但四元数全零，以及无效法兰姿态均 drop。
 
-默认 TCP 是公开长指模型的几何估计，夹爪 `opened=35/closed=120` 是这批数据的暂定源读数基准。
-两者都尚未取得实机标定；跨型号/固件需核对后覆盖参数。
+EEF 原点默认取源法兰安装基准，平移为零，工具轴映射不变。夹爪
+`opened=35/closed=120` 仍是这批数据的暂定源读数基准；跨型号/固件需核对后覆盖参数。
 
-- `--tcp-offset X Y Z`：TCP 在源法兰系的坐标，米。
+- `--eef-offset X Y Z`：夹爪安装接口原点在源法兰系的坐标，米。
 - `--left-tool-rpy R P Y` / `--right-tool-rpy R P Y`：规范工具旋转相对源法兰，弧度。
 - `--gripper-open VALUE` / `--gripper-closed VALUE`：实测源读数基准，单位与源一致，可反向。
 

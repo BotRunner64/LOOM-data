@@ -26,11 +26,11 @@ SIDES = ('left', 'right')
 CAMERAS = {f'observation.images.{name}_rgb': name for name in (
     'head', 'head_right', 'left_wrist', 'right_wrist',
 )}
-# Common physical TCP: midpoint of the G1 finger tips (geometric estimate).
-# G1 front face -> finger origin 0.03689 m -> tip 0.041465 m.
-TIP_DISTANCE = 0.03689 + 0.041465
-DEFAULT_TCP_OFFSETS = {'r1lite': (0.08165 + TIP_DISTANCE, 0., 0.),
-                       'r1pro': (0., 0., -TIP_DISTANCE)}
+# Mount datum is arm_link6 (Lite) / arm_link7 (Pro). The Pro native
+# gripper_base_link is translated [-0.0295, 0, -0.16065] from its mount,
+# with identical axes; invert that fixed translation to recover the mount.
+DEFAULT_EEF_OFFSETS = {'r1lite': (0., 0., 0.),
+                       'r1pro': (0.0295, 0., 0.16065)}
 # Columns are contract X (approach), Y, Z (back/camera side) in native ee_pose.
 TOOL_AXES = {'r1lite': np.eye(3),
              'r1pro': np.array([[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]])}
@@ -45,7 +45,7 @@ QUALITY_LABELS = {'qualified', 'unqualified', '合格', '不合格'}
 
 def validate_source(info):
     robot_type = info.get('robot_type')
-    if info.get('codebase_version') != 'v2.1' or robot_type not in DEFAULT_TCP_OFFSETS:
+    if info.get('codebase_version') != 'v2.1' or robot_type not in DEFAULT_EEF_OFFSETS:
         raise ValueError('Expected Galaxea LeRobot v2.1 with robot_type r1lite or r1pro')
     dof = 6 if robot_type == 'r1lite' else 7
     features = info['features']
@@ -102,8 +102,8 @@ def openness(values, count):
 class GalaxeaKinematics:
     """Recorded ee_pose + measured torso FK, in a stationary chassis frame."""
 
-    def __init__(self, model_dir, robot_type, tcp_offset=None):
-        if robot_type not in DEFAULT_TCP_OFFSETS:
+    def __init__(self, model_dir, robot_type, eef_offset=None):
+        if robot_type not in DEFAULT_EEF_OFFSETS:
             raise ValueError(f'Unsupported robot_type: {robot_type}')
         self.robot_type = robot_type
         manifest = json.loads((model_dir / 'robot.json').read_text())
@@ -122,8 +122,8 @@ class GalaxeaKinematics:
                 f'torso_joint{i}' for i in range(1, self.torso_count + 1)}:
             raise ValueError(f'{robot_type}: unexpected torso kinematic chain')
         self.torso = Robot(model.name, tuple([link] + [j.child for j in reversed(chain)]), tuple(chain))
-        offset = DEFAULT_TCP_OFFSETS[robot_type] if tcp_offset is None else tcp_offset
-        self.tcp = np.append(finite_array(offset, (3,), 'TCP offset in metres'), 1.)
+        offset = DEFAULT_EEF_OFFSETS[robot_type] if eef_offset is None else eef_offset
+        self.eef = np.append(finite_array(offset, (3,), 'EEF mounting offset in metres'), 1.)
         self.axes = TOOL_AXES[robot_type]
 
     def poses(self, torso_values, native_poses):
@@ -137,7 +137,7 @@ class GalaxeaKinematics:
             native = finite_array(native, (7,), 'native ee_pose')
             transform = torso @ pose_matrix(native[:3], native[3:])
             rotation = transform[:3, :3] @ self.axes
-            position = (transform @ self.tcp)[:3]
+            position = (transform @ self.eef)[:3]
             result.append(np.concatenate((position, rotation.T.reshape(-1))))
         return result
 
@@ -280,13 +280,13 @@ def discover_tasks(source):
 
 
 def convert(source, output, models_dir=ROOT / 'assets/robot_models', *,
-            robot_type=None, limit=None, limit_episodes=None, tcp_offsets=None):
+            robot_type=None, limit=None, limit_episodes=None, eef_offsets=None):
     if output.exists():
         raise ValueError(f'Output already exists: {output}')
     for value in (limit, limit_episodes):
         if value is not None and (type(value) is not int or value < 1):
             raise ValueError('Limits must be positive integers')
-    if robot_type is not None and robot_type not in DEFAULT_TCP_OFFSETS:
+    if robot_type is not None and robot_type not in DEFAULT_EEF_OFFSETS:
         raise ValueError(f'Unsupported robot_type filter: {robot_type}')
     selected = []
     for directory in discover_tasks(source):
@@ -308,7 +308,7 @@ def convert(source, output, models_dir=ROOT / 'assets/robot_models', *,
                 kind, cameras = validate_source(info)
                 if kind not in models:
                     models[kind] = GalaxeaKinematics(models_dir / f'galaxea_{kind}', kind,
-                                                    (tcp_offsets or {}).get(kind))
+                                                    (eef_offsets or {}).get(kind))
                 prefix = directory.name
                 if not re.fullmatch(r'[A-Za-z0-9_\-]+', prefix):
                     raise ValueError(f'Unsafe task directory name: {prefix}')
@@ -349,17 +349,17 @@ def main():
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/Galaxea-Open-World-Dataset')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/Galaxea-Open-World-Dataset')
     parser.add_argument('--models-dir', type=Path, default=ROOT / 'assets/robot_models')
-    parser.add_argument('--robot-type', choices=tuple(DEFAULT_TCP_OFFSETS), help='only convert this embodiment')
+    parser.add_argument('--robot-type', choices=tuple(DEFAULT_EEF_OFFSETS), help='only convert this embodiment')
     parser.add_argument('--limit', type=int, help='first N sorted tasks after filtering')
     parser.add_argument('--limit-episodes', type=int, help='first N accepted stationary episodes across selected tasks')
-    for kind in DEFAULT_TCP_OFFSETS:
-        parser.add_argument(f'--{kind}-tcp-offset', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
-                            help=f'calibrated TCP offset in native {kind} ee_pose, metres; default is geometric estimate')
+    for kind in DEFAULT_EEF_OFFSETS:
+        parser.add_argument(f'--{kind}-eef-offset', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                            help=f'mounting origin in native {kind} ee_pose, metres; default follows model mounting joint')
     args = parser.parse_args()
     try:
         convert(args.input_dir, args.output_dir, args.models_dir,
                 robot_type=args.robot_type, limit=args.limit, limit_episodes=args.limit_episodes,
-                tcp_offsets={kind: getattr(args, f'{kind}_tcp_offset') for kind in DEFAULT_TCP_OFFSETS})
+                eef_offsets={kind: getattr(args, f'{kind}_eef_offset') for kind in DEFAULT_EEF_OFFSETS})
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 

@@ -42,7 +42,7 @@ class BaseRecoveryTests(unittest.TestCase):
             self.assertEqual(repairs, ['stationary_base_identity'])
             np.testing.assert_array_equal(fields['robot/orientation'], [[0,0,0,1]]*3)
             np.testing.assert_allclose(beta.poses(fields, (np.eye(4), np.eye(4)))['left_eef'],
-                                       [[0,0,0,1,0,0,0,1,0]]*3)
+                                       [[0,0,0,1,0,0,0,1,0,0,0,1]]*3)
             # Recovery changes only exported arrays, never the raw HDF5.
             with h5py.File(path) as h:
                 self.assertFalse(np.asarray(h['state/robot/orientation']).any())
@@ -211,7 +211,7 @@ class NativeDropTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);source=root/'raw/clean_bowl/1/1.mcap'
             source.parent.mkdir(parents=True);source.touch()
-            store=parallel.prepare(make_config('realomin',root/'raw'),root/'out')
+            store=parallel.prepare(make_config('realomin',root/'raw', eef_offset=[0., 0., 0.]),root/'out')
             with patch.object(realomin,'convert_episode',side_effect=OSError(errno.ENOSPC,'disk full')):
                 self.assertEqual(parallel.worker(root/'out',0,1),1)
             parallel.finalize(root/'out')
@@ -278,7 +278,7 @@ class NativeDropTests(unittest.TestCase):
             root=Path(temporary);source=root/'raw/Clutter Tidy-Up [Stage2]/00001/00001.mcap'
             source.parent.mkdir(parents=True);source.write_bytes(b'not an MCAP')
             self.assertEqual(realomin.discover(root/'raw')[0][1]['instruction'],'Clutter Tidy-Up [Stage2]')
-            realomin.convert(root/'raw',root/'out')
+            realomin.convert(root/'raw',root/'out', eef_offset=[0., 0., 0.])
             s=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual(s['drop_reasons'],{'invalid_mcap':1})
 
@@ -287,7 +287,7 @@ class NativeDropTests(unittest.TestCase):
             root=Path(temporary);source=root/'raw/clean_bowl/1/1.mcap'
             source.parent.mkdir(parents=True);source.touch()
             with patch.object(realomin,'messages',return_value=iter(())),patch.object(realomin,'VideoWriter') as video:
-                realomin.convert(root/'raw',root/'out')
+                realomin.convert(root/'raw',root/'out', eef_offset=[0., 0., 0.])
             video.assert_not_called()
             s=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual(s['drop_reasons'],{'missing_state_stream':1})

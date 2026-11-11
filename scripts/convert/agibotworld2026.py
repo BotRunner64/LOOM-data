@@ -29,9 +29,8 @@ ROOT = Path(__file__).resolve().parents[2]
 STATE_FIELDS = ('state/left_effector/position', 'state/right_effector/position',
                 'state/end/arm_position', 'state/end/arm_orientation', 'state/waist/position',
                 'state/robot/position', 'state/robot/orientation')
-# Provisional closed-pad center from the public CRT120S geometry; see the
-# conversion document. This is not a per-robot TCP calibration.
-DEFAULT_TCP_OFFSET = (0., 0., 0.207056)
+# Recorded flange origin is the gripper mounting datum; keep the tool axes.
+DEFAULT_EEF_OFFSET = (0., 0., 0.)
 CAMERA_PREFIX = 'observation.images.'
 ARCHIVE_NAME = re.compile(r'^(\d+)_(\d+)\.tar\.gz$')
 PARQUET_NAME = re.compile(r'^data/data/chunk-\d+/(episode_\d+)\.parquet$')
@@ -70,7 +69,7 @@ def source_fields(info):
 class G2FK:
     """Torso FK plus recorded flange poses; never recompute the arm with crsB."""
 
-    def __init__(self, directory, tcp_offset=DEFAULT_TCP_OFFSET):
+    def __init__(self, directory, eef_offset=DEFAULT_EEF_OFFSET):
         manifest = json.loads((directory / 'robot.json').read_text())
         if manifest['robot'] != 'agibot_g2':
             raise ValueError('AgiBot World 2026 requires the G2 model')
@@ -84,10 +83,10 @@ class G2FK:
         if link != 'base_link' or {j.name for j in chain if j.type != 'fixed'} != {f'body_joint{i}' for i in range(1, 6)}:
             raise ValueError('Expected G2 base_link to arm_base_link torso chain')
         self.robot = Robot(model.name, tuple([link] + [j.child for j in reversed(chain)]), tuple(chain))
-        offset = np.asarray(tcp_offset, dtype=float)
+        offset = np.asarray(eef_offset, dtype=float)
         if offset.shape != (3,) or not np.isfinite(offset).all():
-            raise ValueError('TCP offset must contain three finite metres')
-        self.tcp = np.append(offset, 1.)
+            raise ValueError('EEF mounting offset must contain three finite metres')
+        self.eef = np.append(offset, 1.)
         # Columns are contract X, Y, Z expressed in the SOURCE FLANGE:
         # approach +Z, lateral -Y, back (wrist camera side) +X.
         self.axes = np.array([[0., 0., 1.], [0., -1., 0.], [1., 0., 0.]])
@@ -113,7 +112,7 @@ class G2FK:
         for position, orientation in zip(positions, orientations):
             transform = world @ torso @ pose_matrix(position, orientation)
             rotation = transform[:3, :3] @ self.axes
-            point = transform @ self.tcp
+            point = transform @ self.eef
             result.append(np.concatenate((point[:3], rotation.T.reshape(-1))).tolist())
         return result
 
@@ -339,7 +338,7 @@ def convert_archive(path, staged, fk, episode_limit=None, *, episode_ids=None,
     return [completed[index] for index in sorted(completed)]
 
 
-def convert(source, output, model_dir, limit=None, limit_episodes=None, tcp_offset=DEFAULT_TCP_OFFSET):
+def convert(source, output, model_dir, limit=None, limit_episodes=None, eef_offset=DEFAULT_EEF_OFFSET):
     if output.exists():
         raise ValueError(f'Output already exists: {output}')
     archives = sorted(source.rglob('*.tar.gz')) if source.is_dir() else [source]
@@ -347,7 +346,7 @@ def convert(source, output, model_dir, limit=None, limit_episodes=None, tcp_offs
         archives = archives[:limit]
     if not archives:
         raise ValueError(f'No tar.gz archives found under {source}')
-    fk = G2FK(model_dir, tcp_offset)
+    fk = G2FK(model_dir, eef_offset)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
         staged = Path(temporary) / 'dataset'
@@ -373,8 +372,8 @@ def main():
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/AgiBotWorld2026')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/AgiBotWorld2026')
     parser.add_argument('--model-dir', type=Path, default=ROOT / 'assets/robot_models/agibot_g2')
-    parser.add_argument('--tcp-offset', type=float, nargs=3, default=DEFAULT_TCP_OFFSET,
-                        metavar=('X', 'Y', 'Z'), help='grasp center in source flange, metres; default is provisional CRT120S geometry')
+    parser.add_argument('--eef-offset', type=float, nargs=3, default=DEFAULT_EEF_OFFSET,
+                        metavar=('X', 'Y', 'Z'), help='mounting origin in source flange, metres; default: flange origin')
     parser.add_argument('--limit', type=int, help='convert only the first N sorted archives')
     parser.add_argument('--limit-episodes', type=int, help='convert only the first N episodes across archives')
     args = parser.parse_args()
@@ -383,7 +382,7 @@ def main():
     if args.limit_episodes is not None and args.limit_episodes < 1:
         parser.error('--limit-episodes must be positive')
     try:
-        convert(args.input_dir, args.output_dir, args.model_dir, args.limit, args.limit_episodes, args.tcp_offset)
+        convert(args.input_dir, args.output_dir, args.model_dir, args.limit, args.limit_episodes, args.eef_offset)
     except (ValueError, OSError, KeyError, tarfile.TarError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 

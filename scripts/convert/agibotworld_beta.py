@@ -27,8 +27,8 @@ CAMERAS = {f'{name}_color.mp4': name for name in (
     'head', 'hand_left', 'hand_right', 'head_center_fisheye', 'head_left_fisheye',
     'head_right_fisheye', 'back_left_fisheye', 'back_right_fisheye',
 )}
-# Provisional long-finger TCP from official G1_120s closed-pad geometry.
-DEFAULT_TCP_OFFSET = (0., 0., 0.207056)
+# Recorded flange origin is the gripper mounting datum; keep the tool axes.
+DEFAULT_EEF_OFFSET = (0., 0., 0.)
 # G1_120s installs its right gripper with a pi rotation about source flange Z.
 DEFAULT_LEFT_TOOL_RPY = (math.pi, -math.pi / 2, 0.)
 DEFAULT_RIGHT_TOOL_RPY = (math.pi, -math.pi / 2, math.pi)
@@ -236,8 +236,8 @@ def convert_episode(source, destination, transforms=None,
         drop = source['drop']
         raise SourceDataError(drop['reason'], drop['detail'], reasons=drop.get('reasons'))
     transforms = transforms if transforms is not None else (
-        tool_transform(DEFAULT_TCP_OFFSET, DEFAULT_LEFT_TOOL_RPY),
-        tool_transform(DEFAULT_TCP_OFFSET, DEFAULT_RIGHT_TOOL_RPY))
+        tool_transform(DEFAULT_EEF_OFFSET, DEFAULT_LEFT_TOOL_RPY),
+        tool_transform(DEFAULT_EEF_OFFSET, DEFAULT_RIGHT_TOOL_RPY))
     normalized_gripper(0., gripper_closed, gripper_open)  # Validate configuration before source classification.
     times, fields, repairs = read_state(source['state'], with_repairs=True)
     values = poses(fields, transforms)
@@ -258,12 +258,12 @@ def convert_episode(source, destination, transforms=None,
     return record
 
 
-def convert(source, output, limit=None, tcp_offset=DEFAULT_TCP_OFFSET,
+def convert(source, output, limit=None, eef_offset=DEFAULT_EEF_OFFSET,
             left_tool_rpy=DEFAULT_LEFT_TOOL_RPY, right_tool_rpy=DEFAULT_RIGHT_TOOL_RPY,
             gripper_closed=DEFAULT_GRIPPER_CLOSED, gripper_open=DEFAULT_GRIPPER_OPEN):
     from scripts.convert.parallel import run_native
     from scripts.convert.parallel_adapters import make_config
-    config = make_config('agibotworld_beta', source, limit=limit, tcp_offset=tcp_offset,
+    config = make_config('agibotworld_beta', source, limit=limit, eef_offset=eef_offset,
                          left_tool_rpy=left_tool_rpy, right_tool_rpy=right_tool_rpy,
                          gripper_closed=gripper_closed, gripper_open=gripper_open)
     run_native(config, output)
@@ -274,7 +274,7 @@ def main():
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/AgiBotWorld-Beta')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/AgiBotWorld-Beta')
     parser.add_argument('--limit', type=int)
-    parser.add_argument('--tcp-offset', nargs=3, type=float, default=DEFAULT_TCP_OFFSET, help='TCP in source flange axes, metres; nominal long-finger geometry by default')
+    parser.add_argument('--eef-offset', nargs=3, type=float, default=DEFAULT_EEF_OFFSET, help='mounting origin in source flange axes, metres; default: flange origin')
     parser.add_argument('--left-tool-rpy', nargs=3, type=float, default=DEFAULT_LEFT_TOOL_RPY)
     parser.add_argument('--right-tool-rpy', nargs=3, type=float, default=DEFAULT_RIGHT_TOOL_RPY)
     parser.add_argument('--gripper-open', type=float, default=DEFAULT_GRIPPER_OPEN, help='measured source value at full open; provisional default 35')
@@ -283,7 +283,7 @@ def main():
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
     try:
-        convert(args.input_dir, args.output_dir, args.limit, args.tcp_offset,
+        convert(args.input_dir, args.output_dir, args.limit, args.eef_offset,
                 args.left_tool_rpy, args.right_tool_rpy, args.gripper_closed, args.gripper_open)
     except (ValueError, OSError, KeyError, RuntimeError) as exc:
         parser.exit(1, f'Error: {exc}\n')

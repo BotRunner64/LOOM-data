@@ -16,13 +16,17 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.convert.export_common import (
-    copy_h264_video, seconds_to_ns, write_state, write_video_index,
+    copy_h264_video, eef_offset as validate_eef_offset, seconds_to_ns, write_state, write_video_index,
     task_instructions as instructions,
 )
 
 from scripts.convert.lerobot_v3 import LeRobotV3Reader, extract_video_segment
 
 ROOT = Path(__file__).resolve().parents[2]
+# Body-fixed virtual fingertip -> nominal rear/pivot datum, from the vendor's
+# approximate 12 cm finger length. Tracking paper + a real opening-only sample
+# support a rigid raw frame; see source.md for evidence and remaining limits.
+DEFAULT_EEF_OFFSET = (-0.12, 0., 0.)
 # Dataset convention: the stored angle is the single-finger angle, not doubled.
 DEFAULT_GRIPPER_OPEN_RAD = float(np.deg2rad(35.))
 CAMERAS = {f'observation.images.{name}': name for name in (
@@ -62,8 +66,15 @@ def validate_source(info, modality):
                 raise ValueError(f'Unsupported modality for {side} {kind}')
 
 
-def poses_from_rows(values):
-    """Source TCP/axes already match the contract; expand its row encoding to a matrix."""
+def mounting_offsets(left_eef_offset, right_eef_offset):
+    return {side: validate_eef_offset(DEFAULT_EEF_OFFSET if value is None else value,
+                                     f'{side} EEF offset').tolist()
+            for side, value in (('left', left_eef_offset), ('right', right_eef_offset))}
+
+
+def poses_from_rows(values, eef_offset=DEFAULT_EEF_OFFSET):
+    """Move the body-fixed virtual tip to the mounting datum; never use aperture."""
+    offset = validate_eef_offset(eef_offset)
     values = np.asarray(values, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] != 9 or not np.isfinite(values).all():
         raise ValueError('Expected finite N x 9 source poses')
@@ -77,7 +88,8 @@ def poses_from_rows(values):
     second -= np.sum(first * second, axis=1, keepdims=True) * first
     second /= np.linalg.norm(second, axis=1, keepdims=True)
     rotation = np.stack((first, second, np.cross(first, second)), axis=1)
-    return np.concatenate((values[:, :3], rotation.transpose(0, 2, 1).reshape(-1, 9)), axis=1)
+    position = values[:, :3] + np.einsum('nij,j->ni', rotation, offset)
+    return np.concatenate((position, rotation.transpose(0, 2, 1).reshape(-1, 9)), axis=1)
 
 
 def validate_gripper_range(closed_rad, open_rad):
@@ -104,16 +116,17 @@ def load_tasks(path):
     return tasks
 
 
-def read_episode(source, tasks, closed_rad, open_rad):
+def read_episode(source, tasks, closed_rad, open_rad, eef_offsets=None):
     metadata = json.loads((source / 'episode.json').read_text(encoding='utf-8'))
     rows = pq.read_table(source / 'data.parquet', columns=list(COLUMNS)).to_pydict()
     index = metadata.get('episode_index')
     if type(index) is not int or source.name != f'episode_{index:06d}':
         raise ValueError(f'{source}: inconsistent episode identity')
-    return read_rows(source, metadata, rows, tasks, closed_rad, open_rad)
+    return read_rows(source, metadata, rows, tasks, closed_rad, open_rad, eef_offsets)
 
 
-def read_rows(source, metadata, rows, tasks, closed_rad, open_rad):
+def read_rows(source, metadata, rows, tasks, closed_rad, open_rad, eef_offsets=None):
+    offsets = mounting_offsets((eef_offsets or {}).get('left'), (eef_offsets or {}).get('right'))
     count = len(rows['timestamp'])
     index = metadata.get('episode_index')
     start, stop = metadata.get('dataset_from_index'), metadata.get('dataset_to_index')
@@ -145,13 +158,13 @@ def read_rows(source, metadata, rows, tasks, closed_rad, open_rad):
         raise ValueError(f'{source}: expected all six camera views')
     streams = {}
     for side, offset in (('right', 0), ('left', 10)):
-        streams[f'{side}_eef'] = poses_from_rows(state[:, offset:offset + 9])
+        streams[f'{side}_eef'] = poses_from_rows(state[:, offset:offset + 9], offsets[side])
         streams[f'{side}_gripper'] = openness(state[:, offset + 9], closed_rad, open_rad)
     return times, streams, annotation
 
 
-def convert_episode(source, destination, tasks, closed_rad, open_rad):
-    times, streams, annotation = read_episode(source, tasks, closed_rad, open_rad)
+def convert_episode(source, destination, tasks, closed_rad, open_rad, eef_offsets=None):
+    times, streams, annotation = read_episode(source, tasks, closed_rad, open_rad, eef_offsets)
     return write_episode(source.name, destination, times, streams, annotation,
                          lambda key, target: copy_h264_video(
                              source / 'videos' / f'{key}.mp4', target, len(times)))
@@ -195,10 +208,10 @@ class ShardReader(LeRobotV3Reader):
                              (source / 'meta/modality.json').read_text(encoding='utf-8'))))
         self.tasks = load_tasks(source / 'meta/tasks.parquet')
 
-    def convert_episode(self, index, destination, closed_rad, open_rad):
+    def convert_episode(self, index, destination, closed_rad, open_rad, eef_offsets=None):
         row = self.episodes[index]
         rows = self.read_rows(index)
-        times, streams, annotation = read_rows(self.source, row, rows, self.tasks, closed_rad, open_rad)
+        times, streams, annotation = read_rows(self.source, row, rows, self.tasks, closed_rad, open_rad, eef_offsets)
         episode_id = shard_episode_id(self.source, index)
         return write_episode(episode_id, destination, times, streams, annotation,
                              lambda key, target: extract_video_segment(
@@ -206,14 +219,15 @@ class ShardReader(LeRobotV3Reader):
 
 
 def convert(source, output, *, gripper_open_rad=DEFAULT_GRIPPER_OPEN_RAD,
-            gripper_closed_rad=0., limit=None):
+            gripper_closed_rad=0., limit=None, left_eef_offset=None, right_eef_offset=None):
+    offsets = mounting_offsets(left_eef_offset, right_eef_offset)
     validate_gripper_range(gripper_closed_rad, gripper_open_rad)
     if limit is not None and (type(limit) is not int or limit < 1):
         raise ValueError('limit must be a positive integer')
     if output.exists():
         raise ValueError(f'Output already exists; choose a new directory: {output}')
     if not (source / 'source').is_dir():
-        return convert_shards(source, output, gripper_closed_rad, gripper_open_rad, limit)
+        return convert_shards(source, output, gripper_closed_rad, gripper_open_rad, limit, offsets)
     validate_source(json.loads((source / 'source/info.json').read_text(encoding='utf-8')),
                     json.loads((source / 'source/modality.json').read_text(encoding='utf-8')))
     tasks = load_tasks(source / 'source/tasks.parquet')
@@ -229,7 +243,7 @@ def convert(source, output, *, gripper_open_rad=DEFAULT_GRIPPER_OPEN_RAD,
             for i, episode in enumerate(episodes, 1):
                 print(f'[{i}/{len(episodes)}] {episode.name}', flush=True)
                 record = convert_episode(episode, staged / 'episodes' / episode.name,
-                                         tasks, gripper_closed_rad, gripper_open_rad)
+                                         tasks, gripper_closed_rad, gripper_open_rad, offsets)
                 handle.write(json.dumps(record, ensure_ascii=False) + '\n')
         if output.exists():
             raise ValueError(f'Output appeared during conversion: {output}')
@@ -237,7 +251,8 @@ def convert(source, output, *, gripper_open_rad=DEFAULT_GRIPPER_OPEN_RAD,
     print(f'Exported {len(episodes)} episodes to {output}', flush=True)
 
 
-def convert_shards(source, output, closed_rad, open_rad, limit):
+def convert_shards(source, output, closed_rad, open_rad, limit, eef_offsets=None):
+    offsets = mounting_offsets((eef_offsets or {}).get('left'), (eef_offsets or {}).get('right'))
     shards = discover_shards(source)
     output.parent.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -251,7 +266,7 @@ def convert_shards(source, output, closed_rad, open_rad, limit):
                 for index in sorted(reader.episodes)[:remaining]:
                     episode_id = shard_episode_id(shard, index)
                     print(f'[{count + 1}] {episode_id}', flush=True)
-                    record = reader.convert_episode(index, staged / 'episodes' / episode_id, closed_rad, open_rad)
+                    record = reader.convert_episode(index, staged / 'episodes' / episode_id, closed_rad, open_rad, offsets)
                     handle.write(json.dumps(record, ensure_ascii=False) + '\n')
                     count += 1
                 # Release the frame table before indexing/loading the next shard.
@@ -269,6 +284,9 @@ def main():
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/HiFi-UMI-2K')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/HiFi-UMI-2K')
     parser.add_argument('--limit', type=int, help='convert only the first N sorted episodes')
+    for side in ('left', 'right'):
+        parser.add_argument(f'--{side}-eef-offset', type=float, nargs=3, default=DEFAULT_EEF_OFFSET,
+                            help=f'{side} mounting origin in the source virtual fingertip axes, metres; default: nominal [-0.12, 0, 0]')
     parser.add_argument('--gripper-closed-rad', type=float, default=0.,
                         help='fixed dataset-wide closed angle (default: 0)')
     parser.add_argument('--gripper-open-rad', type=float, default=DEFAULT_GRIPPER_OPEN_RAD,
@@ -277,7 +295,8 @@ def main():
     import av
     try:
         convert(args.input_dir, args.output_dir, gripper_open_rad=args.gripper_open_rad,
-                gripper_closed_rad=args.gripper_closed_rad, limit=args.limit)
+                gripper_closed_rad=args.gripper_closed_rad, limit=args.limit,
+                left_eef_offset=args.left_eef_offset, right_eef_offset=args.right_eef_offset)
     except (ValueError, OSError, av.FFmpegError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 

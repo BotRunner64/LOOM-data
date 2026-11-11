@@ -53,6 +53,18 @@ python -m scripts.convert.parallel finalize \
 `--dataset` 支持 `abc130k`、`molmoact2`、`hifi_umi`、`galaxea`、`agibotworld2026`、
 `realomin`、`agibotworld_beta`。`--model-dir` 默认为仓库中对应的模型；Galaxea 的该参数指向包含两个本体模型包的父目录。
 
+**安装接口原点迁移：** 配置写入 `export_contract_version = 2`，旧 TCP 版本的计划无论
+prepare、worker 还是 finalize 都拒绝继续使用；已有导出不会自动平移或覆盖，必须换新输出目录重导。
+原 `--tcp-offset` / `--*-tcp-offset` 已替换为 `--eef-offset` / `--*-eef-offset`，
+参数表示安装接口在源工具系中的坐标，不再表示指尖中心。
+RealOmin 默认采用厂商 V3 配套模型推导的后端安装点，可用 `--eef-offset` 覆盖；
+HiFi-UMI 默认采用 `[-0.12,0,0] m` 的名义虚拟后端基准，可用
+`--left-eef-offset X Y Z` / `--right-eef-offset X Y Z` 分别覆盖（安装点在 raw EE 系中的坐标，米）。
+默认值及刚体原点的论文/样本核验依据见[HiFi-UMI 源说明](../sources/hifi-umi/source.md#坐标系与夹爪)。
+偏移在计划中固定；旧零偏移计划不能以新默认值继续 resume，需新输出目录。
+AgiBot 默认源法兰零偏移；
+Galaxea 的 `--r1lite-eef-offset` / `--r1pro-eef-offset` 默认来自模型安装接口。
+
 **RealOmin / Beta 的数据 drop 策略：** 已知源数据异常写入合法的 skipped record，worker
 继续执行并返回成功；运行/程序错误仍写入 errors、返回非零。
 这两个数据源同样支持 finalize 省略有 episode 错误记录的失败集、发布成功部分；
@@ -77,7 +89,7 @@ python -m scripts.convert.parallel run \
   --output-dir dataset/export/AgiBotWorld-Beta --workers 4
 ```
 
-两者均支持 `--tcp-offset`、`--gripper-open`、`--gripper-closed`；RealOmin 另支持
+两者均支持 `--eef-offset`、`--gripper-open`、`--gripper-closed`；RealOmin 另支持
 `--tool-rpy`、`--instruction`，Beta 支持 `--left-tool-rpy`、`--right-tool-rpy`。
 这些工具变换与端点基准会固定在计划中，resume 不能变更。默认值和标定限制见各源转换说明。
 

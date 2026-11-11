@@ -74,4 +74,4 @@ R1 Pro 本地资产位于 `assets/robot_models/galaxea_r1pro/`，来自官方 Ga
 python scripts/robot/fk.py --dataset Galaxea-Open-World-Dataset --robot-type r1pro --link arm_left_link7
 ```
 
-可直接用于可视化和 FK；数据集 TCP、零位及安装外参尚未逐帧标定，状态在清单中明确记录。
+可直接用于可视化和 FK；数据集夹爪安装接口、零位及安装外参尚未逐帧标定，状态在清单中明确记录。

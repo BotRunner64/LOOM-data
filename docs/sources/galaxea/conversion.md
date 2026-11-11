@@ -30,13 +30,14 @@ python scripts/convert/galaxea.py --robot-type r1lite \
 ## 映射与输出
 
 - 保留源逐帧 `timestamp`，秒乘 `1e9` 后取整，所有 state 和 RGB 共享首样本原点，不由 FPS 推算时间。
-- 实测原生末端位姿左乘躯干 FK，再右乘固定工具变换，输出底盘系下 TCP 的位置和完整 3×3 旋转矩阵（按列展平）。底盘只作为筛选后假定固定的参考系，不导出底盘或 action。
+- 实测原生末端位姿左乘躯干 FK，再右乘固定工具变换，输出底盘系下夹爪安装接口的位置和完整 3×3 旋转矩阵（按列展平）。底盘只作为筛选后假定固定的参考系，不导出底盘或 action。
 - G1 夹爪 `openness = clip(stroke_mm / 100, 0, 1)`；非有限值报错。
 - 四路 RGB 逐帧转为无音轨 H.264，逐路检查解码帧数，索引保存源时间；视频容器使用 30 FPS，不代表采集频率。相机 ID 为 `head`、`head_right`、`left_wrist`、`right_wrist`。
 - 指令按逐帧细粒度标签生成区间，缺失时回退到整体任务；不使用质量标签。重复时间戳的零长度区间不写入，保留该时刻最后生效的标签。
 - episode ID 为 `<task_directory>_episode_<index:06d>`，避免不同任务的编号冲突。
 
-默认 TCP 是模型指尖中点估计，未做实机标定。可分别用 `--r1lite-tcp-offset X Y Z`、`--r1pro-tcp-offset X Y Z` 指定相应原生 ee_pose 系下的标定位置（米）。
+默认安装接口偏移为 R1 Lite `[0,0,0]`、R1 Pro `[0.0295,0,0.16065]` 米，来自模型安装关节。
+轴向不变；可用 `--r1lite-eef-offset X Y Z`、`--r1pro-eef-offset X Y Z` 指定安装接口在原生 ee_pose 系中的标定位置（米）。
 
 目标目录必须不存在。全部输出先写到同级暂存目录，成功后一次发布；出错则清理暂存，不覆盖已有导出。全部被筛除时输出空的 `episodes.jsonl` 和 `episodes/`，明确显示导出 0 集。
 

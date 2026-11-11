@@ -14,6 +14,19 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from scripts.convert.source_policy import SourceDataError
 
+# Included in resume plans so older TCP exports cannot be resumed as mount poses.
+EXPORT_CONTRACT_VERSION = 2
+
+
+def eef_offset(value, label='EEF offset'):
+    """Explicit source-frame coordinates of the gripper mounting origin, metres."""
+    if value is None:
+        raise ValueError(f'{label} is required: provide the gripper mounting interface in source axes')
+    offset = np.asarray(value, dtype=np.float64)
+    if offset.shape != (3,) or not np.isfinite(offset).all():
+        raise ValueError(f'{label} requires three finite metres')
+    return offset
+
 
 @contextmanager
 def source_video(path):
@@ -216,9 +229,9 @@ def pose_matrix(position, quaternion):
 
 
 def tool_transform(offset, rpy):
-    """Fixed source-tool -> contract TCP transform; translation in source axes."""
+    """T_source_eef: mounting origin in source axes, with contract tool rotation."""
     from scripts.robot.kinematics import rpy_matrix
-    offset, rpy = np.asarray(offset, dtype=float), np.asarray(rpy, dtype=float)
+    offset, rpy = eef_offset(offset), np.asarray(rpy, dtype=float)
     if offset.shape != (3,) or rpy.shape != (3,) or not np.isfinite([offset, rpy]).all():
         raise ValueError('Tool offset and RPY require three finite values each')
     matrix = np.eye(4)

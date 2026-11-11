@@ -1,9 +1,11 @@
 from fractions import Fraction
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 
 import av
 import numpy as np
@@ -12,6 +14,27 @@ import pyarrow.parquet as pq
 from scripts.convert import realomin as script
 from scripts.convert.export_common import tool_transform
 from scripts.convert.export_validation import validate_episode
+from scripts.robot.realomin_mount import mounting_geometry
+
+
+def geometry_urdfs(root):
+    """Minimal vendor joint excerpts; no network or full asset package needed."""
+    fixture = json.loads((Path(__file__).parent / 'fixtures/realomin_v3_mount_geometry.json').read_text())
+    paths = []
+    for kind in ('gripper', 'controller'):
+        robot = ET.Element('robot', name=kind)
+        ET.SubElement(robot, 'link', name='base_link')
+        for name, value in fixture[f'{kind}_joints'].items():
+            ET.SubElement(robot, 'link', name=name)
+            joint = ET.SubElement(robot, 'joint', name=name, type=value['type'])
+            ET.SubElement(joint, 'parent', link='base_link')
+            ET.SubElement(joint, 'child', link=name)
+            ET.SubElement(joint, 'origin', xyz=' '.join(map(str, value['xyz'])),
+                          rpy=' '.join(map(str, value['rpy'])))
+        path = root / f'{kind}.urdf'
+        ET.ElementTree(robot).write(path)
+        paths.append(path)
+    return paths, fixture
 
 
 def packets():
@@ -31,6 +54,75 @@ def packets():
 
 
 class RealOminTests(unittest.TestCase):
+    def test_default_rear_mount_is_reproducible_from_vendor_models(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            paths, fixture = geometry_urdfs(Path(temporary))
+            geometry = mounting_geometry(*paths)
+            np.testing.assert_allclose(geometry['eef_offset'], fixture['mount_in_raw_eef_m'], atol=1e-12, rtol=0)
+            np.testing.assert_allclose(script.DEFAULT_EEF_OFFSET, geometry['eef_offset'], atol=1e-12, rtol=0)
+            np.testing.assert_allclose(geometry['mount_in_gripper_base_m'],
+                                       fixture['mount_in_gripper_base_m'], atol=1e-12, rtol=0)
+            self.assertAlmostEqual(geometry['max_pivot_residual_m'], .0001, places=12)
+            # Moving the explicit rear flange moves the result. Finger lengths
+            # are absent from the calculation and cannot change the mount datum.
+            tree = ET.parse(paths[1])
+            tree.find("./joint[@name='joint_Flange']/origin").set('xyz', '-0.077889 -0.000038794 -0.097619')
+            tree.write(paths[1])
+            self.assertAlmostEqual(np.linalg.norm(np.array(mounting_geometry(*paths)['eef_offset'])
+                                                 - geometry['eef_offset']), .01, places=10)
+
+    def test_nominal_mount_is_used_by_direct_serial_parallel_and_cli_exports(self):
+        from scripts.convert import parallel
+        from scripts.convert.parallel_adapters import make_config
+        import subprocess
+        import sys
+        records = []
+        # Two changing source rotations catch accidental world-frame addition.
+        quaternions = [(0., 0., 0., 1.), (0., 0., np.sqrt(.5), np.sqrt(.5))]
+        for topic, name in script.STATES.items():
+            for time, quaternion in zip((15, 40), quaternions):
+                value = (NS(frame_id='world', pose=NS(position=NS(x=1., y=2., z=3.),
+                         orientation=NS(**dict(zip(('x', 'y', 'z', 'w'), quaternion)))),
+                         HasField=lambda field: True) if name.endswith('_eef') else NS(value=.0515))
+                records.append((topic, time, value))
+        records.extend(('/robot0/sensor/camera0/compressed', time, NS(data=data, format='h264'))
+                       for time, data in zip((10, 20, 30), packets()))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'raw/clean_bowl/1/1.mcap'
+            source.parent.mkdir(parents=True)
+            source.touch()
+            with patch.object(script, 'messages', side_effect=lambda path, video=False: iter(
+                    row for row in records if bool(script.CAMERA.fullmatch(row[0])) == video)):
+                direct = script.convert_episode({'path': source, 'instruction': 'clean bowl'}, root / 'direct')
+                script.convert(root / 'raw', root / 'serial')
+                config = make_config('realomin', root / 'raw')
+                parallel.prepare(config, root / 'parallel')
+                self.assertEqual(parallel.worker(root / 'parallel', 0, 1), 0)
+                parallel.finalize(root / 'parallel')
+            validate_episode(root / 'direct', {**direct, 'episode_id': 'direct'})
+            record = json.loads((root / 'serial/episodes.jsonl').read_text())
+            p = np.array([1., 2., 3.])
+            # Values independently fixed by the vendor geometry fixture.
+            offset = np.array([-.0682778317412809, .0003727122423727631, -.09805170329867613])
+            expected_positions = [p + offset, p + [-offset[1], offset[0], offset[2]]]
+            for side in ('left', 'right'):
+                relative = Path('state') / f'{side}_eef.parquet'
+                direct_table = pq.read_table(root / 'direct' / relative)
+                np.testing.assert_allclose(np.array(direct_table['pose'].to_pylist())[:, :3], expected_positions, atol=1e-12)
+                for output in ('serial', 'parallel'):
+                    table = pq.read_table(root / output / 'episodes' / record['episode_id'] / relative)
+                    self.assertEqual(table.to_pydict(), direct_table.to_pydict())
+            # Parser must accept omission of --eef-offset, with no model files.
+            bad = root / 'bad/clean_bowl/1.mcap'
+            bad.parent.mkdir(parents=True)
+            bad.write_bytes(b'bad MCAP')
+            result = subprocess.run([sys.executable, '-m', 'scripts.convert.realomin',
+                                     '--input-dir', str(root / 'bad'), '--output-dir', str(root / 'cli')],
+                                    cwd=script.ROOT, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((root / 'cli/episodes.jsonl').exists())
+
     def test_shared_origin_keeps_native_lengths_offsets_and_clips_only_gripper(self):
         records = []
         for topic, name in script.STATES.items():
@@ -78,7 +170,7 @@ class RealOminTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(script, 'messages', return_value=iter([('/robot0/sensor/magnetic_encoder', 100, value)])), patch.object(script, 'VideoWriter') as writer:
                 with self.assertRaisesRegex(ValueError, 'Nonfinite'):
-                    script.convert_episode({'path': Path('sample.mcap'), 'instruction': 'clean'}, Path(temporary)/'ep')
+                    script.convert_episode({'path': Path('sample.mcap'), 'instruction': 'clean'}, Path(temporary)/'ep', transform=tool_transform([0., 0., 0.], script.DEFAULT_TOOL_RPY))
                 writer.assert_not_called()
 
     def test_repeated_leaf_filenames_have_distinct_stable_ids_and_correct_skills(self):
@@ -95,7 +187,7 @@ class RealOminTests(unittest.TestCase):
             self.assertTrue(all(s['instruction']=='Override' for _, s in script.discover(root, 'Override')))
 
     def test_nominal_tool_axes_follow_finger_plane_and_are_right_handed(self):
-        transform = tool_transform(script.DEFAULT_TCP_OFFSET, script.DEFAULT_TOOL_RPY)
+        transform = tool_transform([0., 0., 0.], script.DEFAULT_TOOL_RPY)
         np.testing.assert_allclose(transform[:3, 0], [np.cos(np.pi/12), 0, np.sin(np.pi/12)])
         np.testing.assert_allclose(np.cross(transform[:3, 2], transform[:3, 0]), transform[:3, 1])
         self.assertAlmostEqual(np.linalg.det(transform[:3, :3]), 1.)
@@ -108,7 +200,7 @@ class RealOminTests(unittest.TestCase):
             source.touch()
             with patch.object(script, 'convert_episode', side_effect=ValueError('bad sample')):
                 with self.assertRaisesRegex(RuntimeError, 'Conversion failed'):
-                    script.convert(root/'raw', root/'out')
+                    script.convert(root/'raw', root/'out', eef_offset=[0., 0., 0.])
             self.assertIn('bad sample', next((root/'out.work/errors').glob('*.err')).read_text())
             self.assertFalse((root/'out').exists())
             self.assertFalse(list(root.glob('.out-*')))
@@ -129,7 +221,7 @@ class RealOminTests(unittest.TestCase):
                 records.extend((topic, time, value) for time in (15,40))
             records.extend(('/robot0/sensor/camera0/compressed', time, NS(data=data,format='h264'))
                            for time,data in zip((10,20,30),packets()))
-            config = make_config('realomin',root/'raw',tcp_offset=[.2,0,0],tool_rpy=[0,0,0],instruction='Clean')
+            config = make_config('realomin',root/'raw',eef_offset=[.2,0,0],tool_rpy=[0,0,0],instruction='Clean')
             parallel.prepare(config,root/'out')
             with patch.object(script,'messages',side_effect=lambda path,video=False: iter(
                     r for r in records if bool(script.CAMERA.fullmatch(r[0]))==video)):
@@ -143,9 +235,9 @@ class RealOminTests(unittest.TestCase):
             with patch.object(script,'convert_episode',side_effect=AssertionError('must resume')):
                 self.assertEqual(parallel.worker(root/'out',0,1),0)
             with self.assertRaises(ValueError):
-                make_config('realomin',root/'raw',gripper_closed=0,gripper_open=0)
+                make_config('realomin',root/'raw',gripper_closed=0,gripper_open=0, eef_offset=[0., 0., 0.])
             with self.assertRaises(ValueError):
-                make_config('realomin',root/'raw',left_tool_rpy=[0,0,0])
+                make_config('realomin',root/'raw',left_tool_rpy=[0,0,0], eef_offset=[0., 0., 0.])
 
 
 if __name__ == '__main__':

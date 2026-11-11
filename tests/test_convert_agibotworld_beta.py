@@ -63,7 +63,7 @@ class BetaMappingTests(unittest.TestCase):
                 np.testing.assert_allclose(pose[3:6], expected[:3,0], atol=3e-5, rtol=0)
                 np.testing.assert_allclose(pose[6:9], expected[:3,1], atol=3e-5, rtol=0)
 
-    def test_mobile_base_and_tcp_compose_in_correct_order(self):
+    def test_mobile_base_and_mount_compose_in_correct_order(self):
         fields = {'end/position': np.array([[[1,0,0], [1,0,0]]]),
                   'end/orientation': np.tile([0,0,0,1], (1,2,1)),
                   'robot/position': np.array([[2,3,0]]),
@@ -110,6 +110,9 @@ class BetaExportTests(unittest.TestCase):
             record=json.loads((root/'out/episodes.jsonl').read_text())
             destination=root/'out/episodes'/record['episode_id']
             validate_episode(destination,record)
+            for side in ('left', 'right'):
+                values = pq.read_table(destination / 'state' / f'{side}_eef.parquet')['pose'].to_pylist()
+                np.testing.assert_allclose(np.array(values)[:, :3], [[1., 2., 0.]] * 3)
             for kind in ('state/left_eef','rgb/head'):
                 self.assertEqual(pq.read_table(destination/f'{kind}.parquet')['timestamp_ns'].to_pylist(),[0,31_234_567,68_765_432])
             self.assertEqual(pq.read_table(destination/'state/left_gripper.parquet')['openness'].to_pylist(),[1.,.5,0.])

@@ -28,7 +28,7 @@
 
 - `pose` 是按行展开的 4×4 齐次变换矩阵，表示末端在固定 world 系中的位姿；平移单位为米。
 - world 系固定在工作站左臂基座侧，采用右手系：X 向前、Y 向左、Z 向上；左右臂共用此系。
-- 官方说明未明确原始 `pose` 对应哪个末端 frame。公开[双臂模型](https://github.com/amazon-far/abc/blob/6c467cebcecf16a4dce79e6fd87a7ca2281c3ef0/abc_sim/models/yam_bimanual_empty.xml#L182)中，左右臂均有 `tcp_site`（相对各自 `link_6`，位置 `[0,0,0]`）与 `grasp_site`（位置 `[0,0,0.1347]` 米）；两者旋转均为 `quat="1 0 0 -1"`，对应 site 的 X = −Y_link6、Y = +X_link6、Z = +Z_link6。这是模型定义，尚未证实原始 `pose` 使用其中哪一个，不能直接当作目标格式的 TCP/轴向定义。
+- 官方说明未明确原始 `pose` 对应哪个末端 frame。公开[双臂模型](https://github.com/amazon-far/abc/blob/6c467cebcecf16a4dce79e6fd87a7ca2281c3ef0/abc_sim/models/yam_bimanual_empty.xml#L182)中，左右臂均有 `tcp_site`（相对各自 `link_6`，位置 `[0,0,0]`）与 `grasp_site`（位置 `[0,0,0.1347]` 米）；两者旋转均为 `quat="1 0 0 -1"`，对应 site 的 X = −Y_link6、Y = +X_link6、Z = +Z_link6。这是模型定义，尚未证实原始 `pose` 使用其中哪一个，不能直接当作目标格式的安装接口原点/轴向定义。
 
 ## 时间戳
 

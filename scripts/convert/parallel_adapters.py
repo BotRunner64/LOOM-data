@@ -10,6 +10,7 @@ import re
 import tempfile
 
 from tqdm import tqdm
+from scripts.convert.export_common import EXPORT_CONTRACT_VERSION, eef_offset as validate_eef_offset
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -23,10 +24,10 @@ def module(dataset):
 
 
 def make_config(dataset, source, *, model_dir=None, limit=None, limit_episodes=None,
-                robot_type=None, tcp_offset=None, r1lite_tcp_offset=None, r1pro_tcp_offset=None,
+                robot_type=None, eef_offset=None, r1lite_eef_offset=None, r1pro_eef_offset=None,
                 gripper_open_rad=None, gripper_closed_rad=None, tool_rpy=None,
                 left_tool_rpy=None, right_tool_rpy=None, gripper_open=None, gripper_closed=None,
-                instruction=None):
+                instruction=None, left_eef_offset=None, right_eef_offset=None):
     source = Path(source).resolve()
     if not source.exists() or (dataset != 'agibotworld2026' and not source.is_dir()):
         raise ValueError(f'Input does not exist or has the wrong type: {source}')
@@ -35,12 +36,14 @@ def make_config(dataset, source, *, model_dir=None, limit=None, limit_episodes=N
             raise ValueError('Limits must be positive integers')
     if dataset not in ('abc130k', 'molmoact2', 'hifi_umi', 'galaxea', 'agibotworld2026', 'realomin', 'agibotworld_beta'):
         raise ValueError(f'Unknown dataset: {dataset}')
-    if dataset != 'galaxea' and any(x is not None for x in (robot_type, r1lite_tcp_offset, r1pro_tcp_offset)):
-        raise ValueError('Robot type and Galaxea TCP overrides require --dataset galaxea')
-    if tcp_offset is not None and dataset not in ('agibotworld2026', 'realomin', 'agibotworld_beta'):
-        raise ValueError('--tcp-offset requires --dataset agibotworld2026, realomin or agibotworld_beta')
+    if dataset != 'galaxea' and any(x is not None for x in (robot_type, r1lite_eef_offset, r1pro_eef_offset)):
+        raise ValueError('Robot type and Galaxea EEF overrides require --dataset galaxea')
+    if eef_offset is not None and dataset not in ('agibotworld2026', 'realomin', 'agibotworld_beta'):
+        raise ValueError('--eef-offset requires --dataset agibotworld2026, realomin or agibotworld_beta')
     if dataset != 'hifi_umi' and any(x is not None for x in (gripper_open_rad, gripper_closed_rad)):
         raise ValueError('Gripper angle overrides require --dataset hifi_umi')
+    if dataset != 'hifi_umi' and any(x is not None for x in (left_eef_offset, right_eef_offset)):
+        raise ValueError('Left/right EEF offsets require --dataset hifi_umi')
     if dataset != 'realomin' and any(x is not None for x in (tool_rpy, instruction)):
         raise ValueError('--tool-rpy and --instruction require --dataset realomin')
     if dataset != 'agibotworld_beta' and any(x is not None for x in (left_tool_rpy, right_tool_rpy)):
@@ -48,12 +51,13 @@ def make_config(dataset, source, *, model_dir=None, limit=None, limit_episodes=N
     if dataset not in ('realomin', 'agibotworld_beta') and any(x is not None for x in (gripper_open, gripper_closed)):
         raise ValueError('Source gripper endpoints require --dataset realomin or agibotworld_beta')
     source_module = module(dataset)
-    params = {}
+    params = {'export_contract_version': EXPORT_CONTRACT_VERSION}
     if dataset in ('realomin', 'agibotworld_beta'):
         params['data_policy_version'] = 1
         if model_dir is not None:
             raise ValueError(f'{dataset} uses recorded poses, not --model-dir')
-        params['tcp_offset'] = list(tcp_offset if tcp_offset is not None else source_module.DEFAULT_TCP_OFFSET)
+        params['eef_offset'] = validate_eef_offset(
+            eef_offset if eef_offset is not None else source_module.DEFAULT_EEF_OFFSET).tolist()
         params['gripper_open'] = source_module.DEFAULT_GRIPPER_OPEN if gripper_open is None else gripper_open
         params['gripper_closed'] = source_module.DEFAULT_GRIPPER_CLOSED if gripper_closed is None else gripper_closed
         source_module.normalized_gripper(0., params['gripper_closed'], params['gripper_open'])
@@ -62,11 +66,11 @@ def make_config(dataset, source, *, model_dir=None, limit=None, limit_episodes=N
             params['instruction'] = instruction
             if instruction is not None and (not isinstance(instruction, str) or not instruction.strip()):
                 raise ValueError('Instruction override must be nonempty')
-            source_module.tool_transform(params['tcp_offset'], params['tool_rpy'])
+            source_module.tool_transform(params['eef_offset'], params['tool_rpy'])
         else:
             for side, override in (('left', left_tool_rpy), ('right', right_tool_rpy)):
                 params[f'{side}_tool_rpy'] = list(override if override is not None else getattr(source_module, f'DEFAULT_{side.upper()}_TOOL_RPY'))
-                source_module.tool_transform(params['tcp_offset'], params[f'{side}_tool_rpy'])
+                source_module.tool_transform(params['eef_offset'], params[f'{side}_tool_rpy'])
     elif dataset == 'hifi_umi':
         if model_dir is not None:
             raise ValueError('HiFi-UMI does not use a robot model')
@@ -74,28 +78,30 @@ def make_config(dataset, source, *, model_dir=None, limit=None, limit_episodes=N
         closed = 0. if gripper_closed_rad is None else gripper_closed_rad
         source_module.validate_gripper_range(closed, opened)
         params.update(gripper_open_rad=opened, gripper_closed_rad=closed)
+        params['eef_offsets'] = source_module.mounting_offsets(left_eef_offset, right_eef_offset)
     else:
         default = {'abc130k': 'yam', 'molmoact2': 'yam', 'agibotworld2026': 'agibot_g2', 'galaxea': ''}[dataset]
         model_dir = str(Path(model_dir or ROOT / 'assets/robot_models' / default).resolve())
     if dataset == 'agibotworld2026':
-        params['tcp_offset'] = list(tcp_offset if tcp_offset is not None else source_module.DEFAULT_TCP_OFFSET)
+        params['eef_offset'] = list(eef_offset if eef_offset is not None else source_module.DEFAULT_EEF_OFFSET)
     if dataset == 'galaxea':
-        if robot_type is not None and robot_type not in source_module.DEFAULT_TCP_OFFSETS:
+        if robot_type is not None and robot_type not in source_module.DEFAULT_EEF_OFFSETS:
             raise ValueError(f'Unsupported robot_type: {robot_type}')
         params['robot_type'] = robot_type
-        params['tcp_offsets'] = {kind: list(offset if offset is not None else source_module.DEFAULT_TCP_OFFSETS[kind])
-                                 for kind, offset in [('r1lite', r1lite_tcp_offset), ('r1pro', r1pro_tcp_offset)]}
-    offsets = ([params['tcp_offset']] if 'tcp_offset' in params else []) + list(params.get('tcp_offsets', {}).values())
+        params['eef_offsets'] = {kind: list(offset if offset is not None else source_module.DEFAULT_EEF_OFFSETS[kind])
+                                 for kind, offset in [('r1lite', r1lite_eef_offset), ('r1pro', r1pro_eef_offset)]}
+    offsets = ([params['eef_offset']] if 'eef_offset' in params else []) + list(params.get('eef_offsets', {}).values())
     if any(len(v) != 3 or not all(math.isfinite(x) for x in v) for v in offsets):
-        raise ValueError('TCP offsets require three finite metres')
+        raise ValueError('EEF offsets require three finite metres')
     return {'dataset': dataset, 'source': str(source), 'model_dir': model_dir,
             'limit': limit, 'limit_episodes': limit_episodes, 'params': params}
 
 
 def configuration(args):
-    names = ('model_dir', 'limit', 'limit_episodes', 'robot_type', 'tcp_offset',
-             'r1lite_tcp_offset', 'r1pro_tcp_offset', 'gripper_open_rad', 'gripper_closed_rad',
-             'tool_rpy', 'left_tool_rpy', 'right_tool_rpy', 'gripper_open', 'gripper_closed', 'instruction')
+    names = ('model_dir', 'limit', 'limit_episodes', 'robot_type', 'eef_offset',
+             'r1lite_eef_offset', 'r1pro_eef_offset', 'gripper_open_rad', 'gripper_closed_rad',
+             'tool_rpy', 'left_tool_rpy', 'right_tool_rpy', 'gripper_open', 'gripper_closed', 'instruction',
+             'left_eef_offset', 'right_eef_offset')
     return make_config(args.dataset, args.input_dir, **{k: getattr(args, k, None) for k in names})
 
 
@@ -264,12 +270,12 @@ class Adapter:
         dataset, source, params = config['dataset'], Path(task['source']), config['params']
         model = Path(config['model_dir']) if config['model_dir'] else None
         if dataset == 'realomin':
-            transform = self.context('tool', lambda: m.tool_transform(params['tcp_offset'], params['tool_rpy']))
+            transform = self.context('tool', lambda: m.tool_transform(params['eef_offset'], params['tool_rpy']))
             return m.convert_episode({'path': source, 'instruction': task['instruction']}, destination,
                                      transform, params['gripper_closed'], params['gripper_open'])
         if dataset == 'agibotworld_beta':
             transforms = self.context('tools', lambda: tuple(
-                m.tool_transform(params['tcp_offset'], params[f'{side}_tool_rpy']) for side in ('left', 'right')))
+                m.tool_transform(params['eef_offset'], params[f'{side}_tool_rpy']) for side in ('left', 'right')))
             path = Path(task['annotation_path'])
             if self.annotation_cache is None or self.annotation_cache[0] != path:
                 self.annotation_cache = (path, m.load_annotations(path.parents[1], int(source.parent.parent.name)))
@@ -288,12 +294,13 @@ class Adapter:
             return m.convert_episode(source, destination, tasks, annotated, fk)
         if dataset == 'hifi_umi':
             tasks = self.context('tasks', lambda: m.load_tasks(Path(config['source']) / 'source/tasks.parquet'))
-            return m.convert_episode(source, destination, tasks, params['gripper_closed_rad'], params['gripper_open_rad'])
+            return m.convert_episode(source, destination, tasks, params['gripper_closed_rad'], params['gripper_open_rad'],
+                                     params['eef_offsets'])
         info, metadata, tasks = self.context(str(source), lambda: (
             load_json(source / 'meta/info.json'), m.read_jsonl(source / 'meta/episodes.jsonl', 'episode_index'),
             {i: r['task'] for i, r in m.read_jsonl(source / 'meta/tasks.jsonl', 'task_index').items()}))
         kind, _ = m.validate_source(info)
-        fk = self.context(kind, lambda: m.GalaxeaKinematics(model / f'galaxea_{kind}', kind, params['tcp_offsets'][kind]))
+        fk = self.context(kind, lambda: m.GalaxeaKinematics(model / f'galaxea_{kind}', kind, params['eef_offsets'][kind]))
         index = task['index']
         return m.convert_episode(source, index, metadata[index], tasks, fk, info, destination)
 
@@ -332,14 +339,14 @@ class Adapter:
                 destination = Path(temporary) / episode_id
                 try:
                     record = reader.convert_episode(indices[episode_id], destination,
-                                                    params['gripper_closed_rad'], params['gripper_open_rad'])
+                                                    params['gripper_closed_rad'], params['gripper_open_rad'], params['eef_offsets'])
                     store.commit(episode_id, destination, record)
                 except Exception as exc:
                     failed(episode_id, exc)
 
     def archive(self, task, pending, staging, store, failed):
         fk = self.context('fk', lambda: self.m.G2FK(Path(self.config['model_dir']),
-                                                  self.config['params']['tcp_offset']))
+                                                  self.config['params']['eef_offset']))
         self.m.convert_archive(Path(task['source']), staging, fk, episode_ids=pending,
                                on_episode=lambda record, directory: store.commit(record['episode_id'], directory, record),
                                on_error=failed)

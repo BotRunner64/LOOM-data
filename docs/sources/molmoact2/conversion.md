@@ -25,7 +25,7 @@ python scripts/convert/molmoact2.py --limit 1 --output-dir dataset/processed/Mol
 
 - 仅使用 `observation.state`；不读取 action，也不输出关节、速度等额外数据。
 - 六个实测关节角按 rad 输入 YAM FK；左右臂分别以自身固定基座为参考系，
-  不套用 ABC 的双臂安装外参。工具中心和轴向与 ABC 共用
+  不套用 ABC 的双臂安装外参。安装接口原点和工具轴向与 ABC 共用
   `scripts/robot/yam.py` 的实现，按源说明的固定变换生成位置加按列展平的完整旋转矩阵。
 - 夹爪已有归一化：有限值裁剪到 `[0,1]`，范围内透传；NaN、无穷时报错。
 - 直接将表内 `timestamp` 四舍五入成 int64 纳秒，减去共同首时刻。

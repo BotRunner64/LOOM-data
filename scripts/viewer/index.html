@@ -380,7 +380,7 @@ function render() {
     const openness = gripperIndex < 0 ? null : gripper.values[gripperIndex];
     poseViews[side].setSample(poseIndex, openness);
     document.getElementById('meta-' + side).textContent = poseIndex < 0
-      ? 'Waiting for first TCP sample' : `Sampled at ${seconds(pose.times[poseIndex])}`;
+      ? 'Waiting for first EEF sample' : `Sampled at ${seconds(pose.times[poseIndex])}`;
     document.getElementById('gripper-' + side).textContent = openness === null
       ? 'Gripper: waiting for first sample' : `Gripper opening ${Math.round(openness * 100)}%`;
     document.getElementById('meta-' + side).classList.toggle('anomalous', activeStreams.has(side + '_eef'));

@@ -26,9 +26,11 @@ STATES = {f'/robot{i}/{topic}': f'{side}_{kind}'
           for i, side in enumerate(('left', 'right'))
           for topic, kind in (('vio/eef_pose', 'eef'), ('sensor/magnetic_encoder', 'gripper'))}
 CAMERA = re.compile(r'^/robot([01])/sensor/camera(\d+)/compressed$')
-# Nominal closed inner finger-tip midpoint from the supplied V3 URDF + meshes.
-# VIO-to-URDF registration is not a measured calibration; see source.md.
-DEFAULT_TCP_OFFSET = (0.14405256, 0.00049106, -0.03820249)
+# Nominal V3 rear flange, transferred from the vendor's paired controller model
+# via the drive-pivot datum, then expressed about camera0's raw EE origin.
+# Reproduce with scripts/robot/realomin_mount.py; model hashes and assumptions
+# are recorded in docs/sources/realomin/source.md and the geometry fixture.
+DEFAULT_EEF_OFFSET = (-0.068277831741, 0.000372712242, -0.098051703299)
 DEFAULT_TOOL_RPY = (0., -0.261799387799149, 0.)
 DEFAULT_GRIPPER_OPEN = 0.103
 DEFAULT_GRIPPER_CLOSED = 0.
@@ -125,7 +127,7 @@ def discover(source, instruction=None, limit=None):
 
 def convert_episode(source, destination, transform=None,
                     gripper_closed=DEFAULT_GRIPPER_CLOSED, gripper_open=DEFAULT_GRIPPER_OPEN):
-    transform = tool_transform(DEFAULT_TCP_OFFSET, DEFAULT_TOOL_RPY) if transform is None else transform
+    transform = tool_transform(DEFAULT_EEF_OFFSET, DEFAULT_TOOL_RPY) if transform is None else transform
     normalized_gripper(0., gripper_closed, gripper_open)
     state = {name: ([], []) for name in STATES.values()}
     # Source channel is authoritative: right-hand header.topic_name can say robot0.
@@ -170,11 +172,11 @@ def convert_episode(source, destination, transform=None,
             'instructions': [{'start_ns': 0, 'end_ns': end-origin, 'text': source['instruction']}]}
 
 
-def convert(source, output, limit=None, tcp_offset=DEFAULT_TCP_OFFSET, tool_rpy=DEFAULT_TOOL_RPY,
+def convert(source, output, limit=None, eef_offset=DEFAULT_EEF_OFFSET, tool_rpy=DEFAULT_TOOL_RPY,
             gripper_closed=DEFAULT_GRIPPER_CLOSED, gripper_open=DEFAULT_GRIPPER_OPEN, instruction=None):
     from scripts.convert.parallel import run_native
     from scripts.convert.parallel_adapters import make_config
-    config = make_config('realomin', source, limit=limit, tcp_offset=tcp_offset, tool_rpy=tool_rpy,
+    config = make_config('realomin', source, limit=limit, eef_offset=eef_offset, tool_rpy=tool_rpy,
                          gripper_closed=gripper_closed, gripper_open=gripper_open, instruction=instruction)
     run_native(config, output)
 
@@ -184,7 +186,8 @@ def main():
     parser.add_argument('--input-dir', type=Path, default=DEFAULT_INPUT if DEFAULT_INPUT.exists() else ROOT / 'dataset/raw/10Kh-RealOmin-OpenData')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/10Kh-RealOmin-OpenData')
     parser.add_argument('--limit', type=int)
-    parser.add_argument('--tcp-offset', nargs=3, type=float, default=DEFAULT_TCP_OFFSET, help='TCP in source VIO body axes, metres; nominal V3 geometry by default')
+    parser.add_argument('--eef-offset', nargs=3, type=float, default=DEFAULT_EEF_OFFSET,
+                        help='mounting origin in source raw EE axes, metres; default: nominal V3 rear flange from vendor models')
     parser.add_argument('--tool-rpy', nargs=3, type=float, default=DEFAULT_TOOL_RPY, help='contract tool axes in source body, RPY radians')
     parser.add_argument('--gripper-open', type=float, default=DEFAULT_GRIPPER_OPEN)
     parser.add_argument('--gripper-closed', type=float, default=DEFAULT_GRIPPER_CLOSED)
@@ -193,7 +196,7 @@ def main():
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
     try:
-        convert(args.input_dir, args.output_dir, args.limit, args.tcp_offset, args.tool_rpy,
+        convert(args.input_dir, args.output_dir, args.limit, args.eef_offset, args.tool_rpy,
                 args.gripper_closed, args.gripper_open, args.instruction)
     except (ValueError, OSError, KeyError, RuntimeError) as exc:
         parser.exit(1, f'Error: {exc}\n')

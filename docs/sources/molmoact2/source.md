@@ -72,10 +72,10 @@ MolmoAct2-BimanualYAM/
 固定安装的双臂可分别以自身 `arm_{side}_base_link` 为时不变参考系。
 仓库 YAM 模型的双臂外参来自 ABC 仿真布局，不代表 MolmoAct2 的安装标定。
 
-沿用同一 YAM 工具的模型定义：TCP 为 `link6` 的 `[0,0,0.1347]` 米，
-即模型 `grasp` site；规范工具轴为 `+X = +Z_link6`（接近方向）、
+沿用同一 YAM 工具的安装基准：EEF 原点是 `link6` 原点，与模型 `tcp` site 的位置重合，
+不再使用 `grasp` site 的 `0.1347 m` 指尖偏移；规范工具轴为 `+X = +Z_link6`（接近方向）、
 `+Z = +Y_link6`（相机侧掌背法向）、`+Y = +X_link6`。
-从原生 grasp site 到规范工具系的固定变换无平移，旋转为：
+从模型 tcp site 到规范工具系的固定变换无平移，旋转为：
 
 ```text
 [ 0  0 -1 ]

@@ -1,4 +1,4 @@
-/* Contract-only TCP pose display. Each arm keeps its own fixed reference frame. */
+/* Contract-only EEF pose display. Each arm keeps its own fixed reference frame. */
 import * as THREE from './vendor/three.module.min.js';
 
 export class Pose3D {
@@ -49,7 +49,7 @@ export class Pose3D {
     this.createGeometry();
     this.message = document.createElement('span');
     this.message.className = 'pose-empty';
-    this.message.textContent = 'Waiting for first TCP sample';
+    this.message.textContent = 'Waiting for first EEF sample';
     canvas.parentElement.append(this.message);
     canvas.title = 'Left-drag to rotate, middle/right-drag to pan, and wheel to zoom at the pointer';
     this.onDown = event => {
@@ -148,13 +148,13 @@ export class Pose3D {
       sprite.scale.set(0.085, 0.0425, 1);
       this.tool.add(sprite);
     }
-    // The opaque sphere hides the roots of arrows pointing behind the TCP.
+    // The opaque sphere hides the roots of arrows pointing behind the EEF.
     const white = new THREE.MeshStandardMaterial({color: '#e9eef5', roughness: 0.5});
-    const tcp = new THREE.Mesh(new THREE.SphereGeometry(0.12, 32, 20), white);
-    glyph.add(tcp);
+    const eef = new THREE.Mesh(new THREE.SphereGeometry(0.12, 32, 20), white);
+    glyph.add(eef);
     this.fingers = [-1, 1].map(sign => {
       const finger = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.075, 0.1), white);
-      finger.position.x = 0.075;
+      finger.position.x = 0.225; // Extend forward from the mounting origin.
       finger.userData.sign = sign;
       glyph.add(finger);
       return finger;

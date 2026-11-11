@@ -1,0 +1,103 @@
+{
+  "source": {
+    "url": "https://zcnma1sv5kma.feishu.cn/wiki/CKpbwye45iOlrckukIPc5hKCndh",
+    "gripper_archive": "DAS_Gripper_V3.zip",
+    "gripper_archive_sha256": "be3f200eac7f45871596b2995d4992da6f9d685162d99842e63d5dffb31ea72e",
+    "gripper_urdf_sha256": "dab31fdcd0978b2c49e014981eee119988ae41eb484a21c07f496abc95fd160c",
+    "controller_archive": "DAS_Controller_V3_with_flange.zip",
+    "controller_archive_sha256": "f254d764684441f954e0f33ccefc892ceee05f83976dd7d5bd7c2c965e4acbf4",
+    "controller_urdf_sha256": "45fcd5f7585a25933d6a1e471024ac7e7f9a7e8328e4502926f8944f74ca77db"
+  },
+  "gripper_joints": {
+    "joint_1": {
+      "type": "revolute",
+      "xyz": [
+        0.0216310736631539,
+        0.0434910928671398,
+        -0.0613771581926242
+      ],
+      "rpy": [
+        0.0,
+        -0.261799387799149,
+        0.0
+      ]
+    },
+    "joint_2": {
+      "type": "revolute",
+      "xyz": [
+        0.0215793098541334,
+        -0.0425089071328598,
+        -0.0611839730273663
+      ],
+      "rpy": [
+        0.0,
+        -0.261799387799149,
+        0.0
+      ]
+    },
+    "joint_ca2": {
+      "type": "fixed",
+      "xyz": [
+        -0.000791999999999994,
+        0.000118586624767,
+        -0.0016148068
+      ],
+      "rpy": [
+        -1.5707963267949,
+        0.0,
+        -1.5707963267949
+      ]
+    }
+  },
+  "controller_joints": {
+    "joint1": {
+      "type": "revolute",
+      "xyz": [
+        0.022786,
+        0.042961,
+        -0.059233
+      ],
+      "rpy": [
+        0.0,
+        -0.2618,
+        0.0
+      ]
+    },
+    "joint2": {
+      "type": "revolute",
+      "xyz": [
+        0.022786,
+        -0.043039,
+        -0.059233
+      ],
+      "rpy": [
+        0.0,
+        -0.2618,
+        0.0
+      ]
+    },
+    "joint_Flange": {
+      "type": "fixed",
+      "xyz": [
+        -0.067889,
+        -3.8794e-05,
+        -0.097619
+      ],
+      "rpy": [
+        0.0,
+        -0.2618,
+        0.0
+      ]
+    }
+  },
+  "mount_in_gripper_base_m": [
+    -0.06906983174128123,
+    0.0004912988671400016,
+    -0.09966651009867589
+  ],
+  "mount_in_raw_eef_m": [
+    -0.0682778317412809,
+    0.0003727122423727631,
+    -0.09805170329867613
+  ]
+}

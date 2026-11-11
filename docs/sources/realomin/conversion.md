@@ -22,9 +22,12 @@ python scripts/convert/realomin.py --limit 1 \
 消息数量、视频帧数不一致或显示帧对应时间递减时报错。RGB 使用实际解码尺寸，不依赖旧 `camera_info` 尺寸。
 
 需要 PyAV、MCAP、mcap-protobuf-support、NumPy、PyArrow（均列于 `pyproject.toml`）。
-运行时不依赖资产目录，默认工具变换由本次 V3 模型几何固化；
-`--tcp-offset X Y Z`（米）与 `--tool-rpy R P Y`（弧度）可覆盖原生工具到规范 TCP 的固定变换。
-默认 TCP 缺少 VIO 与实机工具间的精确外参，不能把几何估计视为实机标定。
+运行时不依赖资产目录或网络。默认 EEF 原点采用厂商 V3 采集夹爪与配套带法兰控制夹爪
+模型推导的后端安装点，位于 raw EE 系的
+`[-0.068277831741, 0.000372712242, -0.098051703299] m`；轴向保持不变，
+默认 RPY 为 `[0,-pi/12,0]`。`--eef-offset X Y Z`（米）和 `--tool-rpy R P Y`（弧度）
+均为可选的实机外参覆盖项。名义坐标注册、模型哈希和复算命令见[源契约](source.md#安装接口变换与开度)。
+新默认值与旧指尖估计语义不同，旧导出应使用新的输出目录重新生成。
 
 夹爪默认按 0–0.103 米归一化，可用 `--gripper-closed` / `--gripper-open` 覆盖声明范围。
 `--instruction TEXT` 可覆盖从路径技能名称取得的任务文本。

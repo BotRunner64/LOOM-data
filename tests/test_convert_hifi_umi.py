@@ -134,7 +134,7 @@ class HifiUmiTests(unittest.TestCase):
             root = Path(directory)
             for chunk, part in ((0, 0), (0, 1)):
                 make_shard(root / 'raw', chunk, part)
-            script.convert(root / 'raw', root / 'out')
+            script.convert(root / 'raw', root / 'out', left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             records = [json.loads(line) for line in (root / 'out/episodes.jsonl').read_text().splitlines()]
             self.assertEqual([r['episode_id'] for r in records], [
                 'chunk_0000_part_0000_episode_000007', 'chunk_0000_part_0000_episode_000008',
@@ -163,10 +163,10 @@ class HifiUmiTests(unittest.TestCase):
             reader = script.ShardReader(shard)
             with patch.object(script.pq, 'read_table', wraps=pq.read_table) as read:
                 for index in (7, 8):
-                    reader.convert_episode(index, root / str(index), 0., script.DEFAULT_GRIPPER_OPEN_RAD)
+                    reader.convert_episode(index, root / str(index), 0., script.DEFAULT_GRIPPER_OPEN_RAD, eef_offsets={'left': [0., 0., 0.], 'right': [0., 0., 0.]})
                 self.assertEqual(read.call_count, 1)
                 self.assertEqual(read.call_args.kwargs['columns'], list(script.COLUMNS))
-            script.convert(root / 'raw', root / 'out', limit=3)
+            script.convert(root / 'raw', root / 'out', limit=3, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertEqual(len((root / 'out/episodes.jsonl').read_text().splitlines()), 3)
 
     def test_short_shard_video_does_not_publish(self):
@@ -174,7 +174,7 @@ class HifiUmiTests(unittest.TestCase):
             root = Path(directory)
             make_shard(root / 'raw', video_frames=7)
             with self.assertRaisesRegex(ValueError, 'expected 4 frames, decoded 3'):
-                script.convert(root / 'raw', root / 'out')
+                script.convert(root / 'raw', root / 'out', left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
             self.assertFalse(list(root.glob('.out-*')))
 
@@ -198,13 +198,13 @@ class HifiUmiTests(unittest.TestCase):
         from scripts.robot.kinematics import rpy_matrix
         rotation = rpy_matrix([.2, -.4, .7])
         source = np.r_[1, 2, 3, rotation[:2].ravel()]
-        pose = script.poses_from_rows([source])[0]
+        pose = script.poses_from_rows([source], eef_offset=[0., 0., 0.])[0]
         np.testing.assert_allclose(pose, np.r_[1, 2, 3, rotation.T.reshape(-1)], atol=1e-12)
         reconstructed = pose[3:12].reshape(3, 3).T
         np.testing.assert_allclose(reconstructed.T @ [1, 0, 0], rotation.T @ [1, 0, 0])
         for bad in ([0] * 9, [1, 2, 3, 1, 0, 0, 1, 0, 0], [float('nan')] * 9):
             with self.assertRaises(ValueError):
-                script.poses_from_rows([bad])
+                script.poses_from_rows([bad], eef_offset=[0., 0., 0.])
 
     def test_gripper_uses_fixed_endpoints_and_rejects_nonfinite(self):
         np.testing.assert_allclose(script.openness(np.deg2rad([0, 17.5, 35, 70])), [0, .5, 1, 1])
@@ -221,7 +221,7 @@ class HifiUmiTests(unittest.TestCase):
             root = Path(directory)
             episode = make_source(root / 'raw')
             output = root / 'out'
-            script.convert(root / 'raw', output)
+            script.convert(root / 'raw', output, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             records = [json.loads(line) for line in (output / 'episodes.jsonl').read_text().splitlines()]
             self.assertEqual(len(records), 1)
             record = records[0]
@@ -252,7 +252,7 @@ class HifiUmiTests(unittest.TestCase):
                 self.assertEqual(table['frame_index'].to_pylist(), [0, 1, 2, 3])
                 self.assertEqual(table['timestamp_ns'].to_pylist(), times)
             with self.assertRaisesRegex(ValueError, 'already exists'):
-                script.convert(root / 'raw', output, gripper_open_rad=1.)
+                script.convert(root / 'raw', output, gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
 
     def test_bad_inputs_fail_without_publishing(self):
         mutations = {
@@ -277,7 +277,7 @@ class HifiUmiTests(unittest.TestCase):
                     pq.write_table(changed, episode / 'data.parquet')
                     with patch.object(script, 'copy_h264_video') as video:
                         with self.assertRaises(ValueError):
-                            script.convert(root / 'raw', root / 'out', gripper_open_rad=1.)
+                            script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
                         video.assert_not_called()
                     self.assertFalse((root / 'out').exists())
                     self.assertFalse(list(root.glob('.out-*')))
@@ -291,12 +291,12 @@ class HifiUmiTests(unittest.TestCase):
             original = first.read_bytes()
             first.write_bytes((root / 'short/episodes/episode_000007/videos' / first.name).read_bytes())
             with self.assertRaisesRegex(ValueError, 'expected 4 frames, decoded 3'):
-                script.convert(root / 'raw', root / 'out', gripper_open_rad=1.)
+                script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
             first.write_bytes(original)
             (episode / 'videos' / f'{list(script.CAMERAS)[-1]}.mp4').unlink()
             with self.assertRaises(FileNotFoundError):
-                script.convert(root / 'raw', root / 'out', gripper_open_rad=1.)
+                script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
             self.assertFalse(list(root.glob('.out-*')))
 
@@ -306,7 +306,7 @@ class HifiUmiTests(unittest.TestCase):
             make_source(root / 'raw')
             (root / 'raw/episodes/episode_000008').mkdir()
             with self.assertRaises(FileNotFoundError):
-                script.convert(root / 'raw', root / 'out', gripper_open_rad=1.)
+                script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
 
     def test_source_layout_and_time_validation(self):

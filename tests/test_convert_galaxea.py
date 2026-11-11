@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from scripts.convert.galaxea import (
-    ROOT, DEFAULT_TCP_OFFSETS, TOOL_AXES, GalaxeaKinematics, convert,
+    ROOT, DEFAULT_EEF_OFFSETS, TOOL_AXES, GalaxeaKinematics, convert,
     instruction_segments, is_stationary, openness, source_path, validate_source,
 )
 from scripts.convert.export_common import pose_matrix, transcode_video
@@ -39,7 +39,7 @@ def source_info(kind):
 
 class GalaxeaMappingTests(unittest.TestCase):
     def test_embodiment_and_component_order_are_checked(self):
-        for kind in DEFAULT_TCP_OFFSETS:
+        for kind in DEFAULT_EEF_OFFSETS:
             info = source_info(kind)
             self.assertEqual(validate_source(info), (kind, {'observation.images.head_rgb': 'head'}))
             info['features']['observation.state.left_arm']['shape'] = [8]
@@ -55,7 +55,7 @@ class GalaxeaMappingTests(unittest.TestCase):
             validate_source(info)
 
     def test_planar_chassis_commands_from_server_release(self):
-        for kind in DEFAULT_TCP_OFFSETS:
+        for kind in DEFAULT_EEF_OFFSETS:
             info = source_info(kind)
             info['features']['action.chassis.velocities']['shape'] = [3]
             self.assertEqual(validate_source(info)[0], kind)
@@ -122,11 +122,11 @@ class GalaxeaMappingTests(unittest.TestCase):
 
 
 @unittest.skipUnless(all((ROOT / f'assets/robot_models/galaxea_{k}/robot.json').exists()
-                         for k in DEFAULT_TCP_OFFSETS), 'Galaxea model assets absent')
+                         for k in DEFAULT_EEF_OFFSETS), 'Galaxea model assets absent')
 class GalaxeaPoseTests(unittest.TestCase):
     def test_recorded_poses_match_distinct_model_frames(self):
         fixture = json.loads((Path(__file__).parent / 'fixtures/galaxea_pose_samples.json').read_text())
-        for kind in DEFAULT_TCP_OFFSETS:
+        for kind in DEFAULT_EEF_OFFSETS:
             directory = ROOT / f'assets/robot_models/galaxea_{kind}'
             model = parse_urdf(directory / 'robot.urdf')
             converter = GalaxeaKinematics(directory, kind)
@@ -142,16 +142,17 @@ class GalaxeaPoseTests(unittest.TestCase):
                     link = f'arm_{side}_link6' if kind == 'r1lite' else f'arm_{side}_gripper_base_link'
                     expected = model_poses[link]
                     # Joint and pose topics have small source synchronization errors.
-                    np.testing.assert_allclose(pose[:3], (expected @ converter.tcp)[:3], atol=.01, rtol=0)
+                    mount_link = f'arm_{side}_link{6 if kind == "r1lite" else 7}'
+                    np.testing.assert_allclose(pose[:3], model_poses[mount_link][:3, 3], atol=.01, rtol=0)
                     rotation = expected[:3, :3] @ converter.axes
                     np.testing.assert_allclose(pose[3:6], rotation[:, 0], atol=.03, rtol=0)
                     np.testing.assert_allclose(pose[6:9], rotation[:, 1], atol=.03, rtol=0)
                     # Check the exact composition independently of joint feedback.
                     combined = model_poses[converter.torso_link] @ pose_matrix(raw[:3], raw[3:])
-                    np.testing.assert_allclose(pose[:3], (combined @ converter.tcp)[:3], atol=1e-12)
+                    np.testing.assert_allclose(pose[:3], (combined @ converter.eef)[:3], atol=1e-12)
 
-    def test_torso_motion_changes_reference_pose_and_tcp_rotates_with_tool(self):
-        for kind in DEFAULT_TCP_OFFSETS:
+    def test_torso_motion_changes_reference_pose_and_mount_rotates_with_tool(self):
+        for kind in DEFAULT_EEF_OFFSETS:
             fk = GalaxeaKinematics(ROOT / f'assets/robot_models/galaxea_{kind}', kind)
             raw = [[.2, .3, .4, 0, 0, 0, 1]]*2
             before = fk.poses([0, 0, 0, 0], raw)[0]
@@ -165,14 +166,14 @@ class GalaxeaPoseTests(unittest.TestCase):
 
 
 @unittest.skipUnless(all((ROOT / f'assets/robot_models/galaxea_{k}/robot.json').exists()
-                         for k in DEFAULT_TCP_OFFSETS), 'Galaxea model assets absent')
+                         for k in DEFAULT_EEF_OFFSETS), 'Galaxea model assets absent')
 class GalaxeaExportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.source = self.root/'source'
-        for kind in DEFAULT_TCP_OFFSETS:
+        for kind in DEFAULT_EEF_OFFSETS:
             directory = self.source / kind
             (directory/'meta').mkdir(parents=True)
             info = source_info(kind)
@@ -261,7 +262,7 @@ class GalaxeaExportTests(unittest.TestCase):
         self.assertEqual({p.name for p in output.iterdir()}, {'episodes', 'episodes.jsonl'})
 
     def test_wheel_feedback_is_not_required_or_used_for_selection(self):
-        for kind in DEFAULT_TCP_OFFSETS:
+        for kind in DEFAULT_EEF_OFFSETS:
             directory = self.source / kind
             path = next(directory.glob('data/*/*.parquet'))
             rows = pq.read_table(path).to_pydict()
