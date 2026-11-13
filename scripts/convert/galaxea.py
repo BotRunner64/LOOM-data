@@ -345,6 +345,7 @@ def convert(source, output, models_dir=ROOT / 'assets/robot_models', *,
 
 
 def main():
+    from scripts.convert.storage_budget import add_budget_arguments, run_budgeted_cli
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/Galaxea-Open-World-Dataset')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/Galaxea-Open-World-Dataset')
@@ -355,12 +356,15 @@ def main():
     for kind in DEFAULT_EEF_OFFSETS:
         parser.add_argument(f'--{kind}-eef-offset', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
                             help=f'mounting origin in native {kind} ee_pose, metres; default follows model mounting joint')
+    add_budget_arguments(parser)
     args = parser.parse_args()
     try:
+        if run_budgeted_cli(args, 'galaxea'):
+            return
         convert(args.input_dir, args.output_dir, args.models_dir,
                 robot_type=args.robot_type, limit=args.limit, limit_episodes=args.limit_episodes,
                 eef_offsets={kind: getattr(args, f'{kind}_eef_offset') for kind in DEFAULT_EEF_OFFSETS})
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (RuntimeError, ValueError, OSError, KeyError, TypeError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 
 

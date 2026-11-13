@@ -138,17 +138,21 @@ def convert(source, output, model_dir, limit=None):
 
 
 def main():
+    from scripts.convert.storage_budget import add_budget_arguments, run_budgeted_cli
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/ABC-130K')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/export/ABC-130K')
     parser.add_argument('--model-dir', type=Path, default=ROOT / 'assets/robot_models/yam')
     parser.add_argument('--limit', type=int, help='convert only the first N sorted episodes')
+    add_budget_arguments(parser)
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
     try:
+        if run_budgeted_cli(args, 'abc130k'):
+            return
         convert(args.input_dir, args.output_dir, args.model_dir, args.limit)
-    except (ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 
 

@@ -203,16 +203,20 @@ def convert_dataset(source, output, model_dir, limit):
 
 
 def main():
+    from scripts.convert.storage_budget import add_budget_arguments, run_budgeted_cli
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/MolmoAct2-BimanualYAM')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/MolmoAct2-BimanualYAM')
     parser.add_argument('--model-dir', type=Path, default=ROOT / 'assets/robot_models/yam')
     parser.add_argument('--limit', type=int, help='convert only the first N sorted episodes')
+    add_budget_arguments(parser)
     args = parser.parse_args()
     import av
     try:
+        if run_budgeted_cli(args, 'molmoact2'):
+            return
         convert(args.input_dir, args.output_dir, args.model_dir, limit=args.limit)
-    except (ValueError, OSError, av.FFmpegError) as exc:
+    except (RuntimeError, ValueError, OSError, av.FFmpegError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 
 

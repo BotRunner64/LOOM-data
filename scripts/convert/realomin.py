@@ -182,6 +182,7 @@ def convert(source, output, limit=None, eef_offset=DEFAULT_EEF_OFFSET, tool_rpy=
 
 
 def main():
+    from scripts.convert.storage_budget import add_budget_arguments, run_budgeted_cli
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input-dir', type=Path, default=DEFAULT_INPUT if DEFAULT_INPUT.exists() else ROOT / 'dataset/raw/10Kh-RealOmin-OpenData')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/10Kh-RealOmin-OpenData')
@@ -192,10 +193,13 @@ def main():
     parser.add_argument('--gripper-open', type=float, default=DEFAULT_GRIPPER_OPEN)
     parser.add_argument('--gripper-closed', type=float, default=DEFAULT_GRIPPER_CLOSED)
     parser.add_argument('--instruction', help='Override path-derived skill text for all selected episodes')
+    add_budget_arguments(parser)
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
     try:
+        if run_budgeted_cli(args, 'realomin'):
+            return
         convert(args.input_dir, args.output_dir, args.limit, args.eef_offset, args.tool_rpy,
                 args.gripper_closed, args.gripper_open, args.instruction)
     except (ValueError, OSError, KeyError, RuntimeError) as exc:

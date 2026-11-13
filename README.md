@@ -51,6 +51,10 @@ python -m pip install -e '.[viewer,model-preview]'
 
 下载与选取脚本（每个源数据集一个入口）见 [`scripts/README.md`](scripts/README.md)。单机/Slurm 并行转换及自动 resume 见[并行转换说明](docs/tools/parallel-conversion.md)。
 
+存储有限时，准备计划可加 `--storage-budget 100GiB --sample-seed 42`，按源文件体积估算并固定采样子集。
+预算是近似目标，实际产物大小可能有偏差；可用 `--storage-estimate-ratio` 调整预估比例。七个源转换 CLI 和统一并行入口均支持，
+详见[按存储预算采样转换](docs/tools/parallel-conversion.md#按存储预算采样转换)。
+
 导出后的自动异常检测支持首尾静止、state 突变和中段静止，以及单机/Slurm 并行与自动 resume，运行方式见
 [`docs/tools/anomaly-detection.md`](docs/tools/anomaly-detection.md)。
 

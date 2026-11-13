@@ -27,7 +27,8 @@ def make_config(dataset, source, *, model_dir=None, limit=None, limit_episodes=N
                 robot_type=None, eef_offset=None, r1lite_eef_offset=None, r1pro_eef_offset=None,
                 gripper_open_rad=None, gripper_closed_rad=None, tool_rpy=None,
                 left_tool_rpy=None, right_tool_rpy=None, gripper_open=None, gripper_closed=None,
-                instruction=None, left_eef_offset=None, right_eef_offset=None):
+                instruction=None, left_eef_offset=None, right_eef_offset=None,
+                storage_budget=None, sample_seed=0, storage_estimate_ratio=1.):
     source = Path(source).resolve()
     if not source.exists() or (dataset != 'agibotworld2026' and not source.is_dir()):
         raise ValueError(f'Input does not exist or has the wrong type: {source}')
@@ -93,16 +94,29 @@ def make_config(dataset, source, *, model_dir=None, limit=None, limit_episodes=N
     offsets = ([params['eef_offset']] if 'eef_offset' in params else []) + list(params.get('eef_offsets', {}).values())
     if any(len(v) != 3 or not all(math.isfinite(x) for x in v) for v in offsets):
         raise ValueError('EEF offsets require three finite metres')
-    return {'dataset': dataset, 'source': str(source), 'model_dir': model_dir,
-            'limit': limit, 'limit_episodes': limit_episodes, 'params': params}
+    config = {'dataset': dataset, 'source': str(source), 'model_dir': model_dir,
+              'limit': limit, 'limit_episodes': limit_episodes, 'params': params}
+    if storage_budget is not None:
+        from scripts.convert.storage_budget import storage_bytes
+        if type(sample_seed) is not int:
+            raise ValueError('Sample seed must be an integer')
+        if (isinstance(storage_estimate_ratio, bool) or not isinstance(storage_estimate_ratio, (int, float))
+                or not math.isfinite(storage_estimate_ratio) or storage_estimate_ratio <= 0):
+            raise ValueError('Storage estimate ratio must be positive and finite')
+        config.update(storage_budget=storage_bytes(storage_budget), sample_seed=sample_seed,
+                      storage_estimate_ratio=float(storage_estimate_ratio))
+    elif sample_seed != 0 or storage_estimate_ratio != 1.:
+        raise ValueError('--sample-seed and --storage-estimate-ratio require --storage-budget')
+    return config
 
 
 def configuration(args):
     names = ('model_dir', 'limit', 'limit_episodes', 'robot_type', 'eef_offset',
              'r1lite_eef_offset', 'r1pro_eef_offset', 'gripper_open_rad', 'gripper_closed_rad',
              'tool_rpy', 'left_tool_rpy', 'right_tool_rpy', 'gripper_open', 'gripper_closed', 'instruction',
-             'left_eef_offset', 'right_eef_offset')
-    return make_config(args.dataset, args.input_dir, **{k: getattr(args, k, None) for k in names})
+             'left_eef_offset', 'right_eef_offset', 'storage_budget', 'sample_seed', 'storage_estimate_ratio')
+    return make_config(args.dataset, args.input_dir,
+                       **{k: getattr(args, k, {'sample_seed': 0, 'storage_estimate_ratio': 1.}.get(k)) for k in names})
 
 
 def load_json(path):

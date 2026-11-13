@@ -2,7 +2,7 @@
 
 将各数据集的转换脚本（见 [`../sources/`](../sources/)）通过 Slurm 在单机或多机上执行。采用 **固定任务清单 + 静态分配 + episode 独立提交 + 自动 resume**。不引入 `torch.distributed`、动态队列、租约或在线抢占。
 
-统一入口是 [`scripts/convert/parallel.py`](../../scripts/convert/parallel.py)。原有各源转换 CLI 保留单次整集转换行为；需要并行和 resume 时使用本入口。
+统一入口是 [`scripts/convert/parallel.py`](../../scripts/convert/parallel.py)。原有各源转换 CLI 未指定存储预算时保留原有行为；指定预算时复用本入口的单 worker 续跑流程。需要并行时使用本入口。
 
 ## 运行
 
@@ -144,8 +144,38 @@ python -m scripts.convert.parallel prepare \
 - `--limit N`：前 N 个调度任务；AgiBot 为 archive，其余为 episode。
 - `--limit-episodes N`：全局前 N 个候选 episode，包含合法跳过的 episode。它不同于原 Galaxea CLI 的“前 N 个成功导出”语义。
 - `--robot-type` 仅用于 Galaxea；TCP 和夹爪参数见 `python -m scripts.convert.parallel run --help`。
+- `--storage-budget SIZE`：按预估存储量在准备阶段采样，见下节。
+- `--sample-seed N`：设置预算时的 episode 采样种子，默认 `0`。
+- `--storage-estimate-ratio R`：预估产物／源文件大小比例，默认 `1`。
 
 转换失败返回非零退出码，episode 诊断保存在 `<work>/errors/`，worker 级诊断保存在 `<work>/logs/`。共享源数据必须保持不变；修复原始数据或修改转换配置后，使用新输出目录。
+
+## 按存储预算采样转换
+
+预算是规划时的近似目标，用于根据存储能力选取部分数据。例如：
+
+```bash
+python -m scripts.convert.parallel prepare \
+  --dataset hifi_umi \
+  --input-dir dataset/raw/HiFi-UMI-2K \
+  --output-dir dataset/export/HiFi-UMI-2K-100GiB \
+  --storage-budget 100GiB --sample-seed 42
+```
+
+之后照常启动 `worker` 并执行 `finalize`；这两个阶段不接收、不检查预算。
+本地 `run` 和七个源转换 CLI 也接受相同参数，它们调用 prepare 生成采样计划后执行原有转换流程。
+未设置预算时保留原来的任务清单和执行行为。
+
+- `SIZE` 支持正整数字节、十进制 `GB` / `TB` 和二进制 `GiB` / `TiB`，也支持整字节小数，例如 `1.5GiB`。预算按每个输出目录独立计算。
+- prepare 利用源文件的大小元数据估算产物，不提前转换或解码。默认假设产物／源文件大小比例为 `1`。同一源文件被多个任务引用时按任务平分，每个任务的体积再按其候选 episode 平分，避免把一个拼接视频或 archive 对每集重复计费。分片和 archive 的集大小是近似均摊值。
+- 如已有小样本转换结果，可用 `--storage-estimate-ratio R` 指定预估产物／源文件大小比例；例如预计转码后体积约为源文件的两倍，设置 `--storage-estimate-ratio 2`。默认估算没有自动测量压缩比，不同格式、视频内容和 episode 时长会导致误差。最终产物、manifest 和临时文件的实际占用可能超过预算，应按可用空间留余量。
+- `--limit` / `--limit-episodes` 先限定候选范围，再根据 `--sample-seed` 给每个 episode 生成固定随机优先级，依次选择预估体积能放入剩余预算的完整 episode；放不下的候选略过。按体积筛选会影响各集的入选概率，这不是严格等概率抽样。预算连最小估算 episode 也容纳不下时，prepare 报错，不生成空计划。
+- **plan 只包含最终选定的 episode**，并保留原调度任务与源读取顺序。archive / shard 可以只选择其中部分 episode，worker 仍按原分组读取。预算不参与执行、提交或最终发布，也不会中途丢弃已经转换的数据。
+- `plan.json` 的 `storage_sampling` 保存估算方法、比例、候选数、入选数、预估候选总体积和选中部分体积；prepare 也会打印摘要。预算、比例、种子和子集随计划固定，resume 不重新采样，也不允许修改这些参数。worker 数变化不会改变选定子集；源数据转换失败和合法 drop 仍按原策略处理。
+
+预算模式下，各源 CLI 的数量限制使用统一并行入口语义；特别是 Galaxea 的 `--limit`
+表示候选 episode 数，`--limit-episodes` 也按候选计数，而不是原单次入口的 task 数或成功导出数。
+旧的运行时硬预算计划不兼容此方案，需使用新输出目录生成计划。
 
 ## 1. 使用约定
 
@@ -153,7 +183,7 @@ python -m scripts.convert.parallel prepare \
 - 每次运行可以改变节点数、worker 数和 CPU 预算；完成状态按 episode 保存，不与 worker 编号绑定。
 - **同一输出同时只允许一个作业。** 重跑前，上一轮所有 worker 必须已经退出；不接管仍在运行的作业。
 - 源数据保持只读且不变。resume 使用原任务清单和转换参数；不兼容的配置变更须使用新输出目录。工具不校验转换代码与模型版本，改代码/模型后可以继续 resume，但需自行保证同一数据集由同一版转换逻辑产出。
-- 最终输出只在整集完成后出现；失败时保留工作目录。已完成的输出经核对属于同一计划后，再次执行直接成功返回；不接受无关的已有输出。
+- 最终输出只在计划完成后出现；失败时保留工作目录。已完成的输出经核对属于同一计划后，再次执行直接成功返回；不接受无关的已有输出。
 
 ## 2. 固定任务清单与分配
 
@@ -295,7 +325,7 @@ Slurm 可从 `--nodes=2 --ntasks=32 --cpus-per-task=1` 起步，并使用 `srun 
 
 ## 8. 验收
 
-- 单 worker 与多 worker 得到相同的 episode 集合及符合契约的内容。
+- 同一计划的单 worker 与多 worker 得到相同的 episode 集合及符合契约的内容；设置预算时也使用固定子集。
 - 在 record 发布前后、episode 目录发布前后终止 worker，重跑后无遗漏、无重复 manifest 行，已提交 episode 不重新转换。
 - 用 32 个 worker 中断后改为 8 个，再改为其他数量，仍能完成同一计划。
 - 验证转换失败后重试、合法跳过、损坏状态报错以及计划不兼容时拒绝 resume。

@@ -270,6 +270,7 @@ def convert(source, output, limit=None, eef_offset=DEFAULT_EEF_OFFSET,
 
 
 def main():
+    from scripts.convert.storage_budget import add_budget_arguments, run_budgeted_cli
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/AgiBotWorld-Beta')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/AgiBotWorld-Beta')
@@ -279,10 +280,13 @@ def main():
     parser.add_argument('--right-tool-rpy', nargs=3, type=float, default=DEFAULT_RIGHT_TOOL_RPY)
     parser.add_argument('--gripper-open', type=float, default=DEFAULT_GRIPPER_OPEN, help='measured source value at full open; provisional default 35')
     parser.add_argument('--gripper-closed', type=float, default=DEFAULT_GRIPPER_CLOSED, help='measured source value at full close; provisional default 120')
+    add_budget_arguments(parser)
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
     try:
+        if run_budgeted_cli(args, 'agibotworld_beta'):
+            return
         convert(args.input_dir, args.output_dir, args.limit, args.eef_offset,
                 args.left_tool_rpy, args.right_tool_rpy, args.gripper_closed, args.gripper_open)
     except (ValueError, OSError, KeyError, RuntimeError) as exc:

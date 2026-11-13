@@ -280,6 +280,7 @@ def convert_shards(source, output, closed_rad, open_rad, limit, eef_offsets=None
 
 
 def main():
+    from scripts.convert.storage_budget import add_budget_arguments, run_budgeted_cli
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/HiFi-UMI-2K')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/HiFi-UMI-2K')
@@ -291,13 +292,16 @@ def main():
                         help='fixed dataset-wide closed angle (default: 0)')
     parser.add_argument('--gripper-open-rad', type=float, default=DEFAULT_GRIPPER_OPEN_RAD,
                         help='fully open single-finger angle (default: 35 degrees = 0.6108652382 rad)')
+    add_budget_arguments(parser)
     args = parser.parse_args()
     import av
     try:
+        if run_budgeted_cli(args, 'hifi_umi'):
+            return
         convert(args.input_dir, args.output_dir, gripper_open_rad=args.gripper_open_rad,
                 gripper_closed_rad=args.gripper_closed_rad, limit=args.limit,
                 left_eef_offset=args.left_eef_offset, right_eef_offset=args.right_eef_offset)
-    except (ValueError, OSError, av.FFmpegError) as exc:
+    except (RuntimeError, ValueError, OSError, av.FFmpegError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 
 

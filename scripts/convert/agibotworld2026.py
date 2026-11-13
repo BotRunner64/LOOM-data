@@ -368,6 +368,7 @@ def convert(source, output, model_dir, limit=None, limit_episodes=None, eef_offs
 
 
 def main():
+    from scripts.convert.storage_budget import add_budget_arguments, run_budgeted_cli
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/AgiBotWorld2026')
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/AgiBotWorld2026')
@@ -376,14 +377,17 @@ def main():
                         metavar=('X', 'Y', 'Z'), help='mounting origin in source flange, metres; default: flange origin')
     parser.add_argument('--limit', type=int, help='convert only the first N sorted archives')
     parser.add_argument('--limit-episodes', type=int, help='convert only the first N episodes across archives')
+    add_budget_arguments(parser)
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
     if args.limit_episodes is not None and args.limit_episodes < 1:
         parser.error('--limit-episodes must be positive')
     try:
+        if run_budgeted_cli(args, 'agibotworld2026'):
+            return
         convert(args.input_dir, args.output_dir, args.model_dir, args.limit, args.limit_episodes, args.eef_offset)
-    except (ValueError, OSError, KeyError, tarfile.TarError) as exc:
+    except (RuntimeError, ValueError, OSError, KeyError, tarfile.TarError) as exc:
         parser.exit(1, f'Error: {exc}\n')
 
 

@@ -30,6 +30,8 @@ from tqdm import tqdm
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts.convert.storage_budget import add_budget_arguments, sample_tasks
+
 ROOT = Path(__file__).resolve().parents[2]
 DATASETS = ('abc130k', 'molmoact2', 'hifi_umi', 'galaxea', 'agibotworld2026', 'realomin', 'agibotworld_beta')
 
@@ -120,6 +122,8 @@ def validate_plan(plan):
     from scripts.convert.export_common import EXPORT_CONTRACT_VERSION
     if plan.get('config', {}).get('params', {}).get('export_contract_version') != EXPORT_CONTRACT_VERSION:
         raise StateError('Incompatible export contract: old TCP plans require a new output and re-export')
+    if plan.get('config', {}).get('storage_budget') is not None and not isinstance(plan.get('storage_sampling'), dict):
+        raise StateError('Incompatible storage budget plan; prepare a new output directory')
     ids = []
     for task in plan['tasks']:
         if not task['episode_ids']:
@@ -387,13 +391,20 @@ def prepare(config, output):
                     stamps.append(input_stamp(path))
                     bar.update()
                 task['inputs'] = stamps
+        tasks, sampling = sample_tasks(config, tasks)
         plan = {'version': 1, 'config': config, 'output': str(output),
                 'tasks': tasks, 'shared_inputs': shared_inputs}
+        if sampling is not None:
+            plan['storage_sampling'] = sampling
         print('Computing plan checksum and writing plan...', file=sys.stderr, flush=True)
         plan['id'] = digest(plan)
         store = Store(output, plan)
         work.mkdir(parents=True, exist_ok=True)
         atomic_json(work / 'plan.json', plan)
+    if sampling := store.plan.get('storage_sampling'):
+        print(f'Storage sampling: {sampling["selected_episodes"]}/{sampling["candidate_episodes"]} episodes; '
+              f'estimated {sampling["estimated_output_bytes"]}/{sampling["budget_bytes"]} bytes '
+              f'(output/source ratio {sampling["estimate_ratio"]})', flush=True)
     stamps = list(store.plan['shared_inputs'])
     for task in store.plan['tasks']:
         stamps += task['inputs']
@@ -597,6 +608,7 @@ def main():
             launch.add_argument('--workers', type=int, default=1, help='local worker count (default 1)')
         launch.add_argument('--limit', type=int, help='first N archives for AgiBot, first N episodes otherwise')
         launch.add_argument('--limit-episodes', type=int, help='first N candidate episodes globally, including legitimate skips')
+        add_budget_arguments(launch)
         launch.add_argument('--robot-type', choices=('r1lite', 'r1pro'), help='Galaxea embodiment filter')
         launch.add_argument('--eef-offset', type=float, nargs=3, help='AgiBot/RealOmin mounting origin in source tool axes, metres')
         for side in ('left', 'right'):
