@@ -11,7 +11,6 @@ import pyarrow.parquet as pq
 
 from support import MODELS, assert_conversion_fails, episode_errors
 from loom_data.sources import abc130k as script
-from loom_data.video import VideoWriter
 from loom_data.contract import write_state
 from loom_data.robot.kinematics import fk_poses
 from loom_data.robot.urdf_model import parse_urdf

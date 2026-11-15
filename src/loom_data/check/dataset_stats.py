@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from loom_data.paths import ROOT
+from loom_data.paths import EXPORT
 NS_PER_SECOND = 1_000_000_000
 
 
@@ -91,13 +91,13 @@ def human_duration(duration_ns):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog='loom-data stats', description=__doc__)
     parser.add_argument('paths', nargs='*', type=Path,
-                        help='dataset roots or their parent (default: dataset/processed)')
+                        help='dataset roots or their parent (default: dataset/export)')
     parser.add_argument('--json', action='store_true', help='print a JSON report to stdout')
     args = parser.parse_args(argv)
     try:
-        roots = discover_datasets(args.paths or [ROOT / 'dataset/processed'])
+        roots = discover_datasets(args.paths or [EXPORT])
         datasets = [summarize_dataset(root) for root in roots]
     except KeyboardInterrupt:
         print('Interrupted; dataset files were not modified.', file=sys.stderr, flush=True)
@@ -119,7 +119,3 @@ def main(argv=None):
         for row in rows:
             print('  '.join(value.ljust(width) for value, width in zip(row, widths)))
         print('\nNote: Time comes from instructions (the final end_ns of each episode).')
-
-
-if __name__ == '__main__':
-    main()

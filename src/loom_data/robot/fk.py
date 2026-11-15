@@ -1,23 +1,21 @@
-#!/usr/bin/env python3
 """Compute a canonical link pose from a self-contained URDF package.
 
-python scripts/robot/fk.py --dataset ABC-130K --link arm_left_grasp
-python scripts/robot/fk.py --model-dir /path/to/yam --link arm_left_tcp --joints '{"arm_left_joint2": 1.047}'
+loom-data robot fk --dataset ABC-130K --link arm_left_grasp
+loom-data robot fk --model-dir /path/to/yam --link arm_left_tcp --joints '{"arm_left_joint2": 1.047}'
 Omitted joints use zero; --display-pose instead initializes the inspection pose.
 Output is T_base_link: p_base = T_base_link @ p_link (homogeneous coordinates).
 """
 import argparse
 import json
 from pathlib import Path
-import sys
 
 
 from loom_data.robot.urdf_model import parse_urdf
 from loom_data.robot.kinematics import fk_poses
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='loom-data robot fk', description=__doc__.split('\n\n')[0])
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--dataset")
     selector.add_argument("--model-dir", type=Path)
@@ -25,7 +23,7 @@ def main():
     parser.add_argument("--link", required=True)
     parser.add_argument("--joints", default="{}", help="JSON object, radians/metres, canonical joint names")
     parser.add_argument("--display-pose", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     directory = args.model_dir
     if args.dataset:
         from loom_data.paths import MODELS as models
@@ -56,7 +54,3 @@ def main():
         parser.error(f"Unknown link: {args.link}")
     print(json.dumps({"robot": manifest["robot"], "reference": manifest["base_link"],
                       "link": args.link, "T_base_link": fk_poses(robot, values)[args.link].tolist()}, indent=2))
-
-
-if __name__ == "__main__":
-    main()

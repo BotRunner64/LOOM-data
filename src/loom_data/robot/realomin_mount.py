@@ -55,16 +55,12 @@ def mounting_geometry(gripper_urdf, controller_urdf):
             'max_pivot_residual_m': residual}
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='loom-data robot realomin-mount', description=__doc__.split('\n\n')[0])
     parser.add_argument('--gripper-urdf', type=Path, required=True)
     parser.add_argument('--controller-urdf', type=Path, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     result = mounting_geometry(args.gripper_urdf, args.controller_urdf)
     result['gripper_urdf_sha256'] = hashlib.sha256(args.gripper_urdf.read_bytes()).hexdigest()
     result['controller_urdf_sha256'] = hashlib.sha256(args.controller_urdf.read_bytes()).hexdigest()
     print(json.dumps(result, indent=2))
-
-
-if __name__ == '__main__':
-    main()

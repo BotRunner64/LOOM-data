@@ -24,8 +24,8 @@ STATES = {f'/robot{i}/{topic}': f'{side}_{kind}'
 CAMERA = re.compile(r'^/robot([01])/sensor/camera(\d+)/compressed$')
 # Nominal V3 rear flange, transferred from the vendor's paired controller model
 # via the drive-pivot datum, then expressed about camera0's raw EE origin.
-# Reproduce with scripts/robot/realomin_mount.py; model hashes and assumptions
-# are recorded in docs/sources/realomin/source.md and the geometry fixture.
+# Reproduce with `loom-data robot realomin-mount`; model hashes and assumptions
+# are recorded in docs/sources/realomin.md and the geometry fixture.
 DEFAULT_EEF_OFFSET = (-0.068277831741, 0.000372712242, -0.098051703299)
 DEFAULT_TOOL_RPY = (0., -0.261799387799149, 0.)
 DEFAULT_GRIPPER_OPEN = 0.103

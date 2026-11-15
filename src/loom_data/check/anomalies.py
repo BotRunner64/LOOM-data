@@ -1,12 +1,13 @@
-"""Detect anomalies in an exported dataset without resampling state streams."""
+"""Anomaly rules for exported episodes: boundary idling, state jumps and long internal pauses.
 
-import argparse
+Rules read the native state samples; nothing is resampled. `loom_data.check.job`
+runs them over a dataset.
+"""
+
 from dataclasses import dataclass, fields
-import json
 import math
 from pathlib import Path
 import re
-import tempfile
 
 import numpy as np
 import pyarrow as pa
@@ -256,63 +257,3 @@ def report_path(root, output=None):
             or output.is_relative_to(root / 'episodes')):
         raise ValueError('Output must be a .jsonl report outside episodes/ and cannot replace episodes.jsonl')
     return output
-
-
-def detect_dataset(root, output=None, config=Config()):
-    """Process one episode at a time and atomically replace the JSONL report."""
-    root = Path(root).resolve()
-    output = report_path(root, output)
-    manifest = root / 'episodes.jsonl'
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
-    episodes, anomalies = 0, 0
-    seen = set()
-    try:
-        with manifest.open(encoding='utf-8') as source, tempfile.NamedTemporaryFile(
-                mode='w', encoding='utf-8', dir=output.parent,
-                prefix=f'.{output.name}.', suffix='.tmp', delete=False) as report:
-            temporary = Path(report.name)
-            for index, line in enumerate(source):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                    streams, end_ns = read_episode(root, record)
-                    if record['episode_id'] in seen:
-                        raise ValueError(f'Duplicate episode_id: {record["episode_id"]}')
-                    seen.add(record['episode_id'])
-                    results = detect_episode(index, streams, end_ns, config)
-                except (ValueError, KeyError, TypeError, OSError) as exc:
-                    raise ValueError(f'{manifest}: line {index + 1}: {exc}') from exc
-                for result in results:
-                    report.write(json.dumps(result, separators=(',', ':')) + '\n')
-                episodes += 1
-                anomalies += len(results)
-            if not episodes:
-                raise ValueError('episodes.jsonl is empty')
-        temporary.replace(output)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return episodes, anomalies
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('dataset', type=Path, help='Exported dataset root')
-    parser.add_argument('--output', type=Path, help='JSONL report (default: DATASET/anomalies.jsonl)')
-    for field in fields(Config):
-        parser.add_argument('--' + field.name.replace('_', '-'), default=field.default,
-                            type=field.type, help=f'Default: {field.default}')
-    args = parser.parse_args()
-    try:
-        config = Config(**{field.name: getattr(args, field.name) for field in fields(Config)})
-        episodes, anomalies = detect_dataset(args.dataset, args.output, config)
-    except (OSError, ValueError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-    print(f'Checked {episodes} episodes; wrote {anomalies} anomalies to '
-          f'{args.output or args.dataset / "anomalies.jsonl"}')
-
-
-if __name__ == '__main__':
-    main()

@@ -44,18 +44,6 @@ def validate_manifest_record(record):
     return episode_id
 
 
-def read_dataset(root):
-    episodes = {}
-    for _, record in manifest_records(root):
-        episode_id = validate_manifest_record(record)
-        if episode_id in episodes:
-            raise ValueError(f'Invalid or duplicate episode_id: {episode_id!r}')
-        episodes[episode_id] = record
-    if not episodes:
-        raise ValueError('episodes.jsonl is empty')
-    return episodes
-
-
 class ManifestIndex:
     """Disk-backed episode lookup; the read-only export tree remains untouched."""
 
@@ -146,12 +134,6 @@ def episode_page_bounds(query):
     if offset < 0 or not 1 <= limit <= MAX_EPISODE_PAGE_SIZE:
         raise ValueError('Invalid episode page offset or limit')
     return offset, limit
-
-
-def episode_page(episode_ids, query):
-    offset, limit = episode_page_bounds(query)
-    return {'episodes': episode_ids[offset:offset + limit], 'total': len(episode_ids),
-            'offset': offset, 'limit': limit}
 
 
 def read_anomalies(root, path, episode_id_at=None):
@@ -399,19 +381,15 @@ def serve(root, host, port, anomalies_path=None):
         episode_index.close()
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='loom-data view', description=__doc__.split('\n\n')[0])
     parser.add_argument('dataset', type=Path, help='Exported dataset root')
     parser.add_argument('--anomalies', type=Path,
                         help='Anomaly JSONL report (default: <dataset>/anomalies.jsonl if present)')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         serve(args.dataset.resolve(), args.host, args.port, args.anomalies)
     except (OSError, ValueError, KeyError) as exc:
         parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()

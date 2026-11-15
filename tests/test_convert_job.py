@@ -554,7 +554,6 @@ class SourceTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def test_molmo_real_conversion_matches_standalone(self):
-        from loom_data.sources import molmoact2
         source = self.root / 'raw'
         molmo_source(source)
         output = self.root / 'parallel'

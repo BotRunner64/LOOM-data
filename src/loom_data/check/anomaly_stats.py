@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from loom_data.paths import ROOT
+from loom_data.paths import EXPORT
 from loom_data.check.dataset_stats import discover_datasets
 
 from loom_data.contract import STATE_NAMES
@@ -158,14 +158,14 @@ def print_report(report):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog='loom-data anomaly-stats', description=__doc__)
     parser.add_argument('paths', nargs='*', type=Path,
                         help='dataset roots or their parent (default: dataset/export)')
     parser.add_argument('--anomalies', type=Path, help='custom report; requires a single dataset')
     parser.add_argument('--json', action='store_true', help='print a JSON report to stdout')
     args = parser.parse_args(argv)
     try:
-        roots = discover_datasets(args.paths or [ROOT / 'dataset/export'])
+        roots = discover_datasets(args.paths or [EXPORT])
         if args.anomalies is not None and len(roots) != 1:
             raise ValueError('--anomalies requires a single dataset')
         datasets = [summarize_dataset(root, args.anomalies) for root in roots]
@@ -179,7 +179,3 @@ def main(argv=None):
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         print_report(report)
-
-
-if __name__ == '__main__':
-    main()

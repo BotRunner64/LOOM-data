@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Resumable anomaly detection with local or Slurm workers."""
+"""The anomaly detection job: prepare a plan, run workers, then write the report.
+
+Same shape as the conversion job. State lives in `<report>.anomaly-work`:
+
+    plan.sqlite          one row per episode, with the detection thresholds
+    records/<index>.json anomalies of one checked episode (possibly none)
+    errors/<index>.err   last failure of an unfinished episode
+"""
 from __future__ import annotations
 
 import argparse
@@ -170,7 +177,7 @@ class Store:
 
     def check_shared(self):
         check_inputs([self.plan['manifest'], self.database_stamp])
-        from loom_data.check import anomaly_detection as detector
+        from loom_data.check import anomalies as detector
         if file_digest(detector.__file__) != self.plan['detector']:
             raise StateError('Detection code changed since prepare; use a new report path')
 
@@ -262,7 +269,7 @@ class Store:
 
 def prepare(root, output=None, config=None):
     require_single_process()
-    from loom_data.check import anomaly_detection as detector
+    from loom_data.check import anomalies as detector
     root = Path(root).resolve()
     output = detector.report_path(root, output)
     config = config or detector.Config()
@@ -342,7 +349,7 @@ def worker(root, output=None, worker_id=0, worker_count=1, *, report=None):
     if worker_count < 1 or not 0 <= worker_id < worker_count:
         raise ValueError('Require worker_count > 0 and 0 <= worker_id < worker_count')
     configure_worker()
-    from loom_data.check import anomaly_detection as detector
+    from loom_data.check import anomalies as detector
     root = Path(root).resolve()
     store = Store(root, detector.report_path(root, output))
     store.check_shared()
@@ -381,7 +388,7 @@ def worker(root, output=None, worker_id=0, worker_count=1, *, report=None):
 
 def finalize(root, output=None):
     require_single_process()
-    from loom_data.check import anomaly_detection as detector
+    from loom_data.check import anomalies as detector
     root = Path(root).resolve()
     store = Store(root, detector.report_path(root, output))
     store.check_shared()
@@ -417,6 +424,14 @@ def finalize(root, output=None):
     return episodes, anomalies
 
 
+def run_serial(root, output=None, config=None):
+    """Prepare, check in this process, and write the report."""
+    store = prepare(root, output, config)
+    if not store.published() and worker(store.root, store.output, 0, 1):
+        raise RuntimeError(f'Detection failed; inspect {store.work}/errors/ and rerun to resume')
+    return finalize(store.root, store.output)
+
+
 def run(root, output=None, config=None, workers=1):
     require_single_process()
     if type(workers) is not int or workers < 1:
@@ -424,52 +439,54 @@ def run(root, output=None, config=None, workers=1):
     configure_worker()
     store = prepare(root, output, config)
     if store.published():
-        return
-    command = [sys.executable, '-m', 'loom_data.check.parallel', 'worker',
-               '--input-dir', str(store.root), '--output', str(store.output)]
+        return finalize(store.root, store.output)
+    command = [sys.executable, '-m', 'loom_data', 'check', 'worker', str(store.root), '--output', str(store.output)]
     statuses = run_workers(command, workers)
     if any(statuses):
         raise RuntimeError(f'Workers failed ({statuses}); rerun the same command to resume')
-    finalize(store.root, store.output)
+    return finalize(store.root, store.output)
 
 
-def main():
+def main(argv=None):
     # Limit native pools before importing the detector's NumPy and Arrow dependencies.
     configure_worker()
-    from loom_data.check.anomaly_detection import Config, report_path
-    parser = argparse.ArgumentParser(description=__doc__)
+    from loom_data.check.anomalies import Config, report_path
+    parser = argparse.ArgumentParser(prog='loom-data check', description=__doc__.split('\n\n')[0])
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('prepare', 'worker', 'finalize', 'run'):
-        command = sub.add_parser(name)
-        command.add_argument('--input-dir', '--dataset-dir', type=Path, required=True,
-                             help='Exported dataset root')
-        command.add_argument('--output', type=Path, help='JSONL report (default: INPUT/anomalies.jsonl)')
+    for name, help_text in (
+            ('run', 'local: prepare, run --workers processes, finalize'),
+            ('prepare', 'create or check the plan; one process'),
+            ('worker', 'check the episodes assigned to one worker; launch with srun after prepare'),
+            ('finalize', 'write the report; one process after all workers exit')):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument('dataset', type=Path, help='exported dataset root')
+        command.add_argument('--output', type=Path, help='JSONL report (default: DATASET/anomalies.jsonl)')
         if name in ('prepare', 'run'):
             for field in fields(Config):
                 command.add_argument('--' + field.name.replace('_', '-'), type=field.type,
-                                     default=field.default, help=f'Default: {field.default}')
+                                     default=field.default, help=f'default {field.default}')
         if name == 'run':
-            command.add_argument('--workers', type=int, default=1)
+            command.add_argument('--workers', type=int, default=1, help='local worker processes (default 1)')
         if name == 'worker':
-            command.add_argument('--worker-id', type=int)
-            command.add_argument('--worker-count', type=int)
-    args = parser.parse_args()
+            command.add_argument('--worker-id', type=int, help='default: $SLURM_PROCID')
+            command.add_argument('--worker-count', type=int, help='default: $SLURM_NTASKS')
+    args = parser.parse_args(argv)
     try:
         if args.command == 'worker':
-            output = report_path(args.input_dir.resolve(), args.output)
+            output = report_path(args.dataset.resolve(), args.output)
             with worker_diagnostics(work_directory(output) / 'logs', f'output={output}') as report:
                 rank, count = worker_rank(args.worker_id, args.worker_count)
-                status = worker(args.input_dir, args.output, rank, count, report=report)
+                status = worker(args.dataset, args.output, rank, count, report=report)
                 report(f'Worker exit code: {status}')
                 return status
         if args.command == 'finalize':
-            finalize(args.input_dir, args.output)
+            finalize(args.dataset, args.output)
         else:
             config = Config(**{f.name: getattr(args, f.name) for f in fields(Config)})
             if args.command == 'prepare':
-                prepare(args.input_dir, args.output, config)
+                prepare(args.dataset, args.output, config)
             else:
-                run(args.input_dir, args.output, config, args.workers)
+                run(args.dataset, args.output, config, args.workers)
     except KeyboardInterrupt:
         print('Interrupted; wait for all workers to exit, then rerun to resume.', file=sys.stderr)
         return 130

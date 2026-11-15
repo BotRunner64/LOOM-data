@@ -13,8 +13,9 @@ from unittest.mock import patch
 import numpy as np
 
 from loom_data import paths
-from loom_data.check import anomaly_detection as detector
-from loom_data.check import parallel
+from support import expected_report
+from loom_data.check import anomalies as detector
+from loom_data.check import job as parallel
 from loom_data.contract import write_state, write_video_index
 
 
@@ -42,21 +43,20 @@ class ParallelDetectionTests(unittest.TestCase):
         self.manifest = self.root / 'episodes.jsonl'
         self.manifest.write_text(''.join('\n' + json.dumps(r) + '\n' for r in self.records))
 
-    def cli(self, *args, env=None, direct=False):
-        entry = ['src/loom_data/check/parallel.py'] if direct else ['-m', 'loom_data.check.parallel']
-        return subprocess.run([sys.executable, *entry, *args, '--input-dir', str(self.root)],
-                              cwd=paths.ROOT, env=env, capture_output=True, text=True, check=False)
+    def cli(self, *args, env=None):
+        return subprocess.run([sys.executable, '-m', 'loom_data', 'check', args[0], str(self.root), *args[1:]],
+                              env=env, capture_output=True, text=True, check=False)
 
-    def test_local_cli_matches_serial_and_repeat_skips_all_results(self):
-        serial = self.root / 'serial.jsonl'
-        self.assertEqual(detector.detect_dataset(self.root, serial), (5, 8))
+    def test_local_cli_matches_the_rules_and_repeat_skips_all_results(self):
+        expected = expected_report(self.root)
+        self.assertEqual(len(expected.splitlines()), 8)
         result = self.cli('run', '--workers', '3')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.output.read_bytes(), serial.read_bytes())
+        self.assertEqual(self.output.read_text(), expected)
         store = parallel.Store(self.root, self.output)
         stamps = {p: p.stat().st_mtime_ns for p in (store.work / 'records').iterdir()}
         self.assertEqual(store.result(store.plan['tasks'][2]), [])
-        result = self.cli('run', '--workers', '2', direct=True)
+        result = self.cli('run', '--workers', '2')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Already complete', result.stdout)
         self.assertEqual(stamps, {p: p.stat().st_mtime_ns for p in stamps})
@@ -311,7 +311,7 @@ class ParallelDetectionTests(unittest.TestCase):
             parallel.finalize(self.root)
 
     def test_slurm_phases_and_threshold_overrides(self):
-        result = self.cli('prepare', '--max-boundary-idle-s', '6', direct=True)
+        result = self.cli('prepare', '--max-boundary-idle-s', '6')
         self.assertEqual(result.returncode, 0, result.stderr)
         for rank in range(2):
             env = dict(os.environ, SLURM_PROCID=str(rank), SLURM_NTASKS='2')

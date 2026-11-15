@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """Open a MuJoCo viewer with the canonical robot models side by side.
 
-    python scripts/robot/show_models.py            # interactive viewer
-    python scripts/robot/show_models.py --seconds 3  # auto-close (smoke test)
+    loom-data robot show            # interactive viewer
+    loom-data robot show --seconds 3  # auto-close (smoke test)
 
 Why this is not just ``mujoco.viewer.launch(urdf)``
 ---------------------------------------------------
@@ -19,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -93,10 +91,10 @@ def set_display_pose(model, data, name: str, prefix: str = "") -> None:
             data.qpos[model.jnt_qposadr[jid]] = value
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='loom-data robot show', description=__doc__.split('\n\n')[0])
     parser.add_argument("--seconds", type=float, default=0, help="auto-close after N seconds")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     model = build_model()
     data = mujoco.MjData(model)
@@ -120,7 +118,3 @@ def main() -> int:
             if args.seconds and time.time() - started > args.seconds:
                 break
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

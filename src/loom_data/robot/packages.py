@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 """Validate distributable URDF packages without upstream sources.
 
-python scripts/robot/check_packages.py --load --report /tmp/model-validation.json
+loom-data robot check --load --report /tmp/model-validation.json
 --load requires mujoco; checks visual AND collision geometry after relocation.
 """
 from __future__ import annotations
@@ -134,12 +133,12 @@ def check_package(directory: Path, load: bool = False) -> dict:
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='loom-data robot check', description=__doc__.split('\n\n')[0])
     parser.add_argument("--models", type=Path, default=MODELS)
     parser.add_argument("--load", action="store_true")
     parser.add_argument("--report", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     results = [check_package(p.parent, args.load) for p in sorted(args.models.glob("*/robot.json"))]
     if not results:
         raise SystemExit("No model packages found")
@@ -148,7 +147,3 @@ def main():
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(report + "\n")
-
-
-if __name__ == "__main__":
-    main()

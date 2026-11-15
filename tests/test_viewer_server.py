@@ -9,8 +9,8 @@ from unittest.mock import Mock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from loom_data.viewer.export_viewer import (
-    FrameReader, ManifestIndex, read_anomalies, read_dataset, read_episode, serve,
+from loom_data.viewer.server import (
+    FrameReader, ManifestIndex, read_anomalies, read_episode, serve,
 )
 
 
@@ -68,7 +68,7 @@ class ExportViewerTests(unittest.TestCase):
                 handler.reply = lambda *args: results.append(args)
                 handler.do_GET()
 
-        with patch('loom_data.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
+        with patch('loom_data.viewer.server.ThreadingHTTPServer', FakeServer):
             serve(self.root, '127.0.0.1', 8765, report)
         return results[0]
 
@@ -190,8 +190,10 @@ class ExportViewerTests(unittest.TestCase):
         self.assertIn(b'exceeds episode duration', body)
 
     def test_reads_only_export_contract(self):
-        episodes = read_dataset(self.root)
-        self.assertEqual(episodes, {'sample': self.record})
+        index = ManifestIndex(self.root)
+        self.addCleanup(index.close)
+        self.assertEqual(index.page({})['episodes'], ['sample'])
+        self.assertEqual(index.record('sample'), self.record)
         data = read_episode(self.root, self.record)
         self.assertEqual(data['end_ns'], 30)
         self.assertEqual(data['cameras']['top'], {'times': [10, 30], 'frames': 2})
@@ -209,7 +211,7 @@ class ExportViewerTests(unittest.TestCase):
             '{"episode_id":"../raw","cameras":["top"],"instructions":[]}\n',
             encoding='utf-8')
         with self.assertRaisesRegex(ValueError, 'episode_id'):
-            read_dataset(self.root)
+            ManifestIndex(self.root)
 
     def test_cancelled_browser_response_is_ignored(self):
         captured = {}
@@ -234,7 +236,7 @@ class ExportViewerTests(unittest.TestCase):
                 handler.wfile = SimpleNamespace(write=Mock(side_effect=BrokenPipeError))
                 handler.reply(200, b'image', 'image/jpeg')
 
-        with patch('loom_data.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
+        with patch('loom_data.viewer.server.ThreadingHTTPServer', FakeServer):
             serve(self.root, '127.0.0.1', 8765)
 
     def test_frame_reader_uses_threaded_decode_and_requested_width(self):
@@ -333,7 +335,7 @@ class ExportViewerTests(unittest.TestCase):
                     handler.do_GET()
                     results[path] = handler.reply.call_args.args
 
-        with patch('loom_data.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
+        with patch('loom_data.viewer.server.ThreadingHTTPServer', FakeServer):
             serve(self.root, '127.0.0.1', 8765)
         self.assertIn(b'type="module"', results['/'][1])
         for path in ('/pose3d.js', '/anomalies.js', '/episodes.js', '/vendor/three.module.min.js', '/vendor/three.core.min.js'):

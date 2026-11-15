@@ -1,6 +1,5 @@
 """Checks for distributable packages and source-verified forward kinematics."""
 import json
-from pathlib import Path
 import subprocess
 import sys
 import unittest
@@ -9,12 +8,12 @@ import numpy as np
 
 from loom_data.robot.urdf_model import parse_urdf
 from loom_data.robot.kinematics import fk_poses
-from loom_data.robot.check_packages import check_package, MODELS
+from loom_data.robot.packages import check_package, MODELS
 
 
 class ModelTests(unittest.TestCase):
     def test_galaxea_requires_explicit_embodiment(self):
-        command = [sys.executable, str(Path(__file__).resolve().parents[1] / 'src/loom_data/robot/fk.py'),
+        command = [sys.executable, '-m', 'loom_data', 'robot', 'fk',
                    '--dataset', 'Galaxea-Open-World-Dataset', '--link', 'arm_left_link7']
         missing = subprocess.run(command, capture_output=True, text=True)
         self.assertNotEqual(missing.returncode, 0)

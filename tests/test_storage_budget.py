@@ -10,7 +10,7 @@ from loom_data.convert import job as parallel
 from loom_data.convert.config import make_config
 from loom_data.convert.budget import sample_tasks, storage_bytes
 from test_convert_hifi_umi import make_source, make_shard
-from test_parallel_conversion import add_hifi_episode, manifest
+from test_convert_job import add_hifi_episode, manifest
 
 
 def task(ids, path, size):

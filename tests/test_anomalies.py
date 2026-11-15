@@ -10,7 +10,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from loom_data.check import anomaly_detection as script
+from support import check
+from loom_data.check import anomalies as script
 from loom_data.contract import write_state, write_video_index
 
 
@@ -339,7 +340,7 @@ class DatasetTests(unittest.TestCase):
         self.manifest.write_text('\n' + json.dumps(self.record) + '\n', encoding='utf-8')
 
     def test_jsonl_physical_line_index_camera_endpoint_and_no_video_decode(self):
-        self.assertEqual(script.detect_dataset(self.root), (1, 2))
+        self.assertEqual(check(self.root), (1, 2))
         rows = [json.loads(line) for line in (self.root / 'anomalies.jsonl').read_text().splitlines()]
         self.assertTrue(all(row == dict(index=1, stream='left_eef', start_ns=0,
                                        end_ns=5_000_000_000, reason='boundary_idle') for row in rows))
@@ -349,7 +350,7 @@ class DatasetTests(unittest.TestCase):
         output.write_text('previous\n')
         self.manifest.write_text(json.dumps(self.record) + '\n{}\n')
         with self.assertRaisesRegex(ValueError, 'line 2'):
-            script.detect_dataset(self.root, output)
+            check(self.root, output)
         self.assertEqual(output.read_text(), 'previous\n')
         self.assertEqual(list(self.root.glob('.*.tmp')), [])
 
@@ -358,20 +359,19 @@ class DatasetTests(unittest.TestCase):
                               ([0, 1], [0, 2]), ([0, None], [0, 0])):
             pq.write_table(pa.table({'timestamp_ns': pa.array(times, type=pa.int64()),
                                      'openness': values}), self.base / 'state/left_gripper.parquet')
-            with self.subTest(times=times, values=values), self.assertRaises(ValueError):
-                script.detect_dataset(self.root)
+            with self.subTest(times=times, values=values), self.assertRaises((ValueError, RuntimeError)):
+                check(self.root)
+            self.assertFalse((self.root / 'anomalies.jsonl').exists())
         for output in (self.manifest, self.base / 'report.jsonl', self.root / 'state.parquet'):
             with self.assertRaises(ValueError):
-                script.detect_dataset(self.root, output)
+                check(self.root, output)
 
-    def test_cli_both_entrypoints_and_threshold_override(self):
-        repo = Path(__file__).resolve().parents[1]
-        for entry in (['src/loom_data/check/anomaly_detection.py'], ['-m', 'loom_data.check.anomaly_detection']):
-            result = subprocess.run([sys.executable, *entry, str(self.root), '--max-boundary-idle-s', '5'],
-                                    cwd=repo, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('wrote 0 anomalies', result.stdout)
-            self.assertEqual((self.root / 'anomalies.jsonl').read_text(), '')
+    def test_cli_and_threshold_override(self):
+        result = subprocess.run([sys.executable, '-m', 'loom_data', 'check', 'run', str(self.root),
+                                 '--max-boundary-idle-s', '5'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('wrote 0 anomalies', result.stdout)
+        self.assertEqual((self.root / 'anomalies.jsonl').read_text(), '')
 
 
 if __name__ == '__main__':
