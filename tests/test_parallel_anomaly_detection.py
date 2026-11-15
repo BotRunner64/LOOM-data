@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from loom_data import paths
 from loom_data.check import anomaly_detection as detector
 from loom_data.check import parallel
 from loom_data.contract import write_state, write_video_index
@@ -44,7 +45,7 @@ class ParallelDetectionTests(unittest.TestCase):
     def cli(self, *args, env=None, direct=False):
         entry = ['src/loom_data/check/parallel.py'] if direct else ['-m', 'loom_data.check.parallel']
         return subprocess.run([sys.executable, *entry, *args, '--input-dir', str(self.root)],
-                              cwd=parallel.ROOT, env=env, capture_output=True, text=True, check=False)
+                              cwd=paths.ROOT, env=env, capture_output=True, text=True, check=False)
 
     def test_local_cli_matches_serial_and_repeat_skips_all_results(self):
         serial = self.root / 'serial.jsonl'
@@ -354,9 +355,9 @@ class ParallelDetectionTests(unittest.TestCase):
             parallel.prepare(self.root)
 
     def test_work_directory_is_outside_repository_exports(self):
-        report = parallel.ROOT / 'dataset/export/ABC-130K/anomalies.jsonl'
+        report = paths.ROOT / 'dataset/export/ABC-130K/anomalies.jsonl'
         self.assertEqual(parallel.work_directory(report),
-                         parallel.ROOT / 'dataset/work/ABC-130K/anomalies.jsonl.anomaly-work')
+                         paths.ROOT / 'dataset/work/ABC-130K/anomalies.jsonl.anomaly-work')
         self.assertEqual(parallel.work_directory(self.output),
                          self.output.with_name('anomalies.jsonl.anomaly-work'))
 

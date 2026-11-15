@@ -20,6 +20,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from loom_data import paths, resumable
 from loom_data import video as video_codecs
 from loom_data.convert import abc130k, agibotworld2026, parallel
 from loom_data.convert.parallel_adapters import Adapter, make_config
@@ -152,7 +153,7 @@ class ResumeTests(unittest.TestCase):
     def test_repository_export_keeps_work_separate(self):
         output = self.root / 'dataset/export/hifi'
         work = self.root / 'dataset/work/hifi.work'
-        with patch.object(parallel, 'ROOT', self.root):
+        with patch.object(paths, 'ROOT', self.root):
             store = parallel.prepare(self.config, output)
             self.assertEqual(store.work, work)
             self.assertEqual(parallel.worker(output, 0, 1), 0)
@@ -297,7 +298,7 @@ class ResumeTests(unittest.TestCase):
         with patch.object(Path, 'rename', stop_after_publish):
             with self.assertRaises(KeyboardInterrupt):
                 parallel.finalize(self.output)
-        with patch.object(parallel.subprocess, 'Popen') as spawn:
+        with patch.object(resumable.subprocess, 'Popen') as spawn:
             parallel.run(self.config, self.output, workers=7)
             spawn.assert_not_called()
         self.assertTrue(parallel.Store.load(self.output).published())
@@ -394,7 +395,7 @@ class ResumeTests(unittest.TestCase):
         command = [sys.executable, '-m', 'loom_data.convert.parallel', 'run', '--dataset', 'hifi_umi',
                    '--input-dir', str(self.source), '--output-dir', str(output), '--left-eef-offset', '0', '0', '0', '--right-eef-offset', '0', '0', '0']
         for count in (2, 3):
-            result = subprocess.run([*command, '--workers', str(count)], cwd=parallel.ROOT,
+            result = subprocess.run([*command, '--workers', str(count)], cwd=paths.ROOT,
                                     capture_output=True, text=True, timeout=90, check=False)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(manifest(output)), 2)
@@ -408,7 +409,7 @@ class ResumeTests(unittest.TestCase):
         command = [sys.executable, '-m', 'loom_data.convert.parallel', 'worker',
                    '--output-dir', str(self.output), '--worker-id', '0', '--worker-count', '1']
         for _ in range(2):
-            result = subprocess.run(command, cwd=parallel.ROOT, capture_output=True,
+            result = subprocess.run(command, cwd=paths.ROOT, capture_output=True,
                                     text=True, timeout=60, check=False)
             self.assertEqual(result.returncode, 1, result.stderr)
         logs = list((self.store.work / 'logs').glob('worker-*.err'))
@@ -425,7 +426,7 @@ class ResumeTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if not k.startswith('SLURM_')}
         result = subprocess.run(
             [sys.executable, '-m', 'loom_data.convert.parallel', 'worker', '--output-dir', str(output)],
-            env=env, cwd=parallel.ROOT, capture_output=True, text=True, timeout=60, check=False)
+            env=env, cwd=paths.ROOT, capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(result.returncode, 1, result.stderr)
         log, = output.with_name(output.name + '.work').glob('logs/worker-*.err')
         self.assertIn("KeyError: 'SLURM_PROCID'", log.read_text())
@@ -449,7 +450,7 @@ with patch.object(parallel, 'configure_worker', side_effect=error):
             result = subprocess.run(
                 [sys.executable, '-c', code, 'worker', '--output-dir', str(output),
                  '--worker-id', '0', '--worker-count', '1', kind],
-                cwd=parallel.ROOT, capture_output=True, text=True, timeout=60, check=False)
+                cwd=paths.ROOT, capture_output=True, text=True, timeout=60, check=False)
             self.assertEqual(result.returncode, status, result.stderr)
             log, = output.with_name(output.name + '.work').glob('logs/worker-*.err')
             self.assertIn(expected, log.read_text())
@@ -467,7 +468,7 @@ with patch.object(parallel, 'configure_worker', side_effect=os.abort):
         result = subprocess.run(
             [sys.executable, '-c', code, 'worker', '--output-dir', str(self.output),
              '--worker-id', '0', '--worker-count', '1'],
-            cwd=parallel.ROOT, capture_output=True, text=True, timeout=60, check=False)
+            cwd=paths.ROOT, capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(result.returncode, -signal.SIGABRT, result.stderr)
         log, = (self.store.work / 'logs').glob('worker-*.err')
         self.assertIn('Fatal Python error: Aborted', log.read_text())
@@ -487,7 +488,7 @@ def committed_record(path, value):
 with patch.object(parallel, 'atomic_json', side_effect=committed_record):
     parallel.worker(sys.argv[1], 0, 1)
 '''
-        result = subprocess.run([sys.executable, '-c', code, str(self.output)], cwd=parallel.ROOT,
+        result = subprocess.run([sys.executable, '-c', code, str(self.output)], cwd=paths.ROOT,
                                 capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(result.returncode, -signal.SIGKILL, result.stdout + result.stderr)
         self.assertTrue((self.store.work / 'records' / f'{self.episode_id}.json').exists())
@@ -510,7 +511,7 @@ with patch.object(parallel, 'atomic_json', side_effect=committed_record):
             if rank is not None:
                 env.update(SLURM_PROCID=str(rank), SLURM_NTASKS=str(count))
             return subprocess.run([sys.executable, '-m', 'loom_data.convert.parallel', *args],
-                                  env=env, cwd=parallel.ROOT, capture_output=True,
+                                  env=env, cwd=paths.ROOT, capture_output=True,
                                   text=True, timeout=60, check=False)
 
         self.assertEqual(cli(prepare_args).returncode, 0)

@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import faulthandler
 import hashlib
 import json
 import os
-import signal
-import socket
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import traceback
@@ -22,20 +18,11 @@ from itertools import islice
 from pathlib import Path
 
 from loom_data.contract import STATE_NAMES
-from loom_data.convert.parallel import (
-    ROOT,
-    StateError,
-    atomic_json,
-    atomic_text,
-    check_inputs,
-    configure_worker,
-    digest,
-    encoded,
-    input_stamp,
-    progress,
-    read_json,
-    require_single_process,
-    sync_directory,
+from loom_data import resumable
+from loom_data.resumable import (
+    StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, encoded, input_stamp,
+    progress, read_json, require_single_process, run_cli, run_workers, sync_directory, worker_diagnostics,
+    worker_rank,
 )
 
 
@@ -46,11 +33,7 @@ def file_digest(path):
 
 def work_directory(output):
     """Keep recovery files out of repository exports and away from conversion state."""
-    output = Path(output).resolve()
-    export_root = (ROOT / 'dataset/export').resolve()
-    if output.is_relative_to(export_root):
-        output = ROOT / 'dataset/work' / output.relative_to(export_root)
-    return output.with_name(output.name + '.anomaly-work')
+    return resumable.work_directory(output, '.anomaly-work')
 
 
 @contextmanager
@@ -355,33 +338,6 @@ def prepare(root, output=None, config=None):
     return store
 
 
-@contextmanager
-def worker_diagnostics(output):
-    directory = work_directory(output) / 'logs'
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f'worker-{uuid.uuid4().hex}.err'
-    with path.open('x', encoding='utf-8', buffering=1) as handle:
-        def report(message):
-            print(message, file=handle, flush=True)
-        report(f'host={socket.gethostname()} pid={os.getpid()} argv={sys.argv!r}')
-        report(f'SLURM_JOB_ID={os.environ.get("SLURM_JOB_ID")} '
-               f'SLURM_PROCID={os.environ.get("SLURM_PROCID")} '
-               f'SLURM_NTASKS={os.environ.get("SLURM_NTASKS")}')
-        print(f'Worker diagnostics: {path}', file=sys.stderr, flush=True)
-        was_enabled = faulthandler.is_enabled()
-        faulthandler.enable(file=handle)
-        try:
-            yield report
-        except BaseException:
-            traceback.print_exc(file=handle)
-            handle.flush()
-            raise
-        finally:
-            faulthandler.disable()
-            if was_enabled:
-                faulthandler.enable()
-
-
 def worker(root, output=None, worker_id=0, worker_count=1, *, report=None):
     if worker_count < 1 or not 0 <= worker_id < worker_count:
         raise ValueError('Require worker_count > 0 and 0 <= worker_id < worker_count')
@@ -471,20 +427,9 @@ def run(root, output=None, config=None, workers=1):
         return
     command = [sys.executable, '-m', 'loom_data.check.parallel', 'worker',
                '--input-dir', str(store.root), '--output', str(store.output)]
-    processes = []
-    try:
-        for rank in range(workers):
-            processes.append(subprocess.Popen([*command, '--worker-id', str(rank),
-                                                '--worker-count', str(workers)], cwd=ROOT))
-        statuses = [p.wait() for p in processes]
-        if any(statuses):
-            raise RuntimeError(f'Workers failed ({statuses}); rerun the same command to resume')
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
-        for process in processes:
-            process.wait()
+    statuses = run_workers(command, workers)
+    if any(statuses):
+        raise RuntimeError(f'Workers failed ({statuses}); rerun the same command to resume')
     finalize(store.root, store.output)
 
 
@@ -511,9 +456,9 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == 'worker':
-            with worker_diagnostics(report_path(args.input_dir.resolve(), args.output)) as report:
-                rank = args.worker_id if args.worker_id is not None else int(os.environ['SLURM_PROCID'])
-                count = args.worker_count if args.worker_count is not None else int(os.environ['SLURM_NTASKS'])
+            output = report_path(args.input_dir.resolve(), args.output)
+            with worker_diagnostics(work_directory(output) / 'logs', f'output={output}') as report:
+                rank, count = worker_rank(args.worker_id, args.worker_count)
                 status = worker(args.input_dir, args.output, rank, count, report=report)
                 report(f'Worker exit code: {status}')
                 return status
@@ -535,7 +480,4 @@ def main():
 
 
 if __name__ == '__main__':
-    def interrupted(signum, frame):
-        raise KeyboardInterrupt()
-    signal.signal(signal.SIGTERM, interrupted)
-    sys.exit(main())
+    run_cli(main)

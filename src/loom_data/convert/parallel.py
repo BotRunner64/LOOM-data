@@ -5,110 +5,31 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-import errno
-import faulthandler
-import hashlib
 from itertools import islice
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-import signal
-import socket
-import stat
-import subprocess
 import sys
 import tempfile
-import time
 import traceback
-import uuid
-
-from tqdm import tqdm
 
 from loom_data.convert.storage_budget import add_budget_arguments, sample_tasks
 
-from loom_data.paths import ROOT
+from loom_data.resumable import (
+    StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, encoded, input_stamp,
+    no_progress, progress, read_json, require_single_process, run_cli, run_workers, sync_directory,
+    worker_diagnostics, worker_rank,
+)
+from loom_data import resumable
+
+
+def work_directory(output):
+    return resumable.work_directory(output, '.work')
+
+
 DATASETS = ('abc130k', 'molmoact2', 'hifi_umi', 'galaxea', 'agibotworld2026', 'realomin', 'agibotworld_beta')
-
-
-class StateError(ValueError):
-    """Inconsistent recovery state: never overwrite or silently skip it."""
-
-
-def progress(label, total=None, *, unit='item'):
-    """Use tqdm on stderr, refreshing redirected logs less frequently."""
-    terminal = sys.stderr.isatty()
-    return tqdm(desc=label, total=total, unit=unit, file=sys.stderr,
-                dynamic_ncols=terminal, mininterval=.1 if terminal else 5, miniters=1,
-                disable=os.environ.get('LOOM_DATA_NO_PROGRESS') == '1')
-
-
-def _no_progress(label, total=None, *, unit='item'):
-    return tqdm(desc=label, total=total, unit=unit, disable=True)
-
-
-def encoded(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
-
-
-def digest(value):
-    return hashlib.sha256(encoded(value).encode()).hexdigest()
-
-
-def read_json(path):
-    try:
-        return json.loads(path.read_text(encoding='utf-8'))
-    except (ValueError, OSError) as exc:
-        raise StateError(f'Cannot read {path}: {exc}') from exc
-
-
-def sync_directory(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def atomic_text(path, text):
-    temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
-    try:
-        with temporary.open('x', encoding='utf-8') as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(path)
-        sync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def atomic_json(path, value):
-    atomic_text(path, encoded(value) + '\n')
-
-
-def input_stamp(path):
-    path = Path(path)
-    try:
-        info = path.stat()
-    except OSError as exc:
-        # Match Path.exists() for missing paths and unresolvable symlinks.
-        if exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
-            raise
-        return {'path': str(path), 'size': None, 'mtime_ns': None}
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError(f'Expected source file: {path}')
-    return {'path': str(path), 'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
-
-
-def check_inputs(stamps, progress=_no_progress):
-    with progress('Verifying inputs', len(stamps), unit='file') as bar:
-        for stamp in stamps:
-            if input_stamp(stamp['path']) != stamp:
-                raise ValueError(f'Source changed since prepare: {stamp["path"]}; use a new output')
-            bar.update()
 
 
 def validate_plan(plan):
@@ -129,16 +50,6 @@ def validate_plan(plan):
     if (not ids or len(set(ids)) != len(ids)
             or any(not isinstance(i, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', i) for i in ids)):
         raise StateError('Episode IDs must be unique safe identifiers')
-
-
-def work_directory(output):
-    """Keep conversion state outside repository exports."""
-    output = Path(output).resolve()
-    export_root = (ROOT / 'dataset/export').resolve()
-    if not output.is_relative_to(export_root) or output == export_root:
-        return output.with_name(output.name + '.work')
-    relative = output.relative_to(export_root)
-    return (ROOT / 'dataset/work' / relative).with_name(relative.name + '.work')
 
 
 class Store:
@@ -206,7 +117,7 @@ class Store:
             raise StateError(f'{episode_id}: damaged recovery state: {exc}') from exc
         return record
 
-    def audit(self, *, published=False, complete=False, progress=_no_progress):
+    def audit(self, *, published=False, complete=False, progress=no_progress):
         records = self.work / 'records'
         if records.is_symlink():
             raise StateError('Symlink records directory')
@@ -265,7 +176,7 @@ class Store:
                 raise StateError(f'{len(unfinished)} unfinished episodes, including {unfinished[:3]}')
         return exported, skipped, missing
 
-    def published(self, progress=_no_progress):
+    def published(self, progress=no_progress):
         if not self.output.exists():
             return False
         if self.dataset.exists():
@@ -350,11 +261,6 @@ def validate_conversion(value):
             or len(set(repairs)) != len(repairs)):
         raise StateError('Invalid conversion repair reasons')
 
-def require_single_process():
-    if int(os.environ.get('SLURM_NTASKS', '1')) > 1 and 'SLURM_PROCID' in os.environ:
-        raise ValueError('prepare, finalize and local run require one process; launch worker with srun')
-
-
 def prepare(config, output):
     require_single_process()
     from loom_data.convert.parallel_adapters import discover
@@ -435,49 +341,6 @@ def prepare(config, output):
           f'{failed} failed, {len(missing) - failed} unfinished)', flush=True)
     print(f'Prepared {len(store.plan["tasks"])} tasks / {len(store.ids)} episodes: {work}', flush=True)
     return store
-
-
-def configure_worker():
-    # Set before importing numpy/Arrow/codec modules in child processes.
-    for key in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
-        os.environ[key] = '1'
-    os.environ['LOOM_DATA_SERIAL_CODECS'] = '1'
-    import pyarrow as pa
-    pa.set_cpu_count(1)
-    pa.set_io_thread_count(1)
-
-
-@contextmanager
-def worker_diagnostics(output):
-    """Keep CLI startup failures and native crash stacks outside episode records."""
-    output = Path(output).resolve()
-    directory = work_directory(output) / 'logs'
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f'worker-{uuid.uuid4().hex}.err'
-    with path.open('x', encoding='utf-8', buffering=1) as handle:
-        def report(message):
-            print(f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())} {message}',
-                  file=handle, flush=True)
-
-        report(f'Start host={socket.gethostname()} pid={os.getpid()} output={output}')
-        report(f'Python: {sys.executable}; argv={sys.argv!r}')
-        for key in ('SLURM_JOB_ID', 'SLURM_STEP_ID', 'SLURM_PROCID', 'SLURM_NTASKS'):
-            report(f'{key}={os.environ.get(key, "<unset>")}')
-        print(f'Worker diagnostics: {path}', file=sys.stderr, flush=True)
-        was_enabled = faulthandler.is_enabled()
-        faulthandler.enable(file=handle)
-        try:
-            yield report
-        except BaseException:
-            report('Worker terminated by exception:')
-            traceback.print_exc(file=handle)
-            handle.flush()
-            raise
-        finally:
-            faulthandler.disable()
-            if was_enabled:
-                faulthandler.enable()
 
 
 def worker(output, worker_id, worker_count, *, report=None):
@@ -571,22 +434,12 @@ def run(config, output, workers=1):
     if store.published():
         return
     command = [sys.executable, '-m', 'loom_data.convert.parallel', 'worker', '--output-dir', str(store.output)]
-    processes = []
-    try:
-        for rank in range(workers):
-            processes.append(subprocess.Popen([*command, '--worker-id', str(rank), '--worker-count', str(workers)], cwd=ROOT))
-        statuses = [p.wait() for p in processes]
-        if any(statuses):
-            if store.native_policy:
-                store.audit()
-                store.write_summary()
-            raise RuntimeError(f'Workers failed ({statuses}); rerun the same command to resume')
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
-        for process in processes:
-            process.wait()
+    statuses = run_workers(command, workers)
+    if any(statuses):
+        if store.native_policy:
+            store.audit()
+            store.write_summary()
+        raise RuntimeError(f'Workers failed ({statuses}); rerun the same command to resume')
     finalize(store.output)
 
 
@@ -630,9 +483,9 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == 'worker':
-            with worker_diagnostics(args.output_dir) as report:
-                rank = args.worker_id if args.worker_id is not None else int(os.environ['SLURM_PROCID'])
-                count = args.worker_count if args.worker_count is not None else int(os.environ['SLURM_NTASKS'])
+            output = Path(args.output_dir).resolve()
+            with worker_diagnostics(work_directory(output) / 'logs', f'output={output}') as report:
+                rank, count = worker_rank(args.worker_id, args.worker_count)
                 status = worker(args.output_dir, rank, count, report=report)
                 report(f'Worker exit code: {status}; episode errors: {work_directory(args.output_dir)}/errors/')
                 return status
@@ -660,8 +513,4 @@ def main():
 
 
 if __name__ == '__main__':
-    def interrupted(signum, frame):
-        raise KeyboardInterrupt()
-
-    signal.signal(signal.SIGTERM, interrupted)
-    sys.exit(main())
+    run_cli(main)
