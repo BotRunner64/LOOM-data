@@ -22,7 +22,7 @@ from loom_data.sources.base import Source, task_limit
 
 # Body-fixed virtual fingertip -> nominal rear/pivot datum, from the vendor's
 # approximate 12 cm finger length. Tracking paper + a real opening-only sample
-# support a rigid raw frame; see source.md for evidence and remaining limits.
+# support a rigid raw frame; see docs/sources/hifi_umi.md for evidence and remaining limits.
 DEFAULT_EEF_OFFSET = (-0.12, 0., 0.)
 # Dataset convention: the stored angle is the single-finger angle, not doubled.
 DEFAULT_GRIPPER_OPEN_RAD = float(np.deg2rad(35.))

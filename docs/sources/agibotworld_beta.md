@@ -1,10 +1,37 @@
-# AgiBot World Beta 源数据说明
+# AgiBot World Beta
+
+| | |
+|---|---|
+| 上游 | [agibot-world/AgiBotWorld-Beta](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Beta) |
+| 数据集键 | `agibotworld_beta` |
+| 位姿来源 | 源记录的法兰位姿（已含腰部），乘底盘位姿和固定工具变换 |
+| 机器人模型 | 不需要 |
+| 不合格的 episode | 源数据异常整集 drop 并记录原因；程序和磁盘错误仍记为失败 |
+
+```bash
+loom-data download agibotworld_beta select --count 5
+loom-data download agibotworld_beta download
+loom-data convert run --dataset agibotworld_beta --workers 8
+```
+
+本数据源的选项（均可省略）：
+
+| 选项 | 含义 | 默认 |
+|---|---|---|
+| `--eef-offset X Y Z` | 安装接口在源法兰系中的坐标，米 | `0 0 0` |
+| `--left-tool-rpy / --right-tool-rpy R P Y` | 规范工具轴相对源法兰的旋转，弧度 | 见下文 |
+| `--gripper-open / --gripper-closed` | 全开 / 闭合时的源读数，可反向 | `35` / `120`（暂定） |
+
+`--limit` 按候选 episode 计数，会被 drop 的也占名额。
+
+通用选项、并行与续跑见[使用说明](../usage.md)；输出格式见[导出契约](../contract/export-contract.md)。
+
+## 原始数据
 
 上游：[Hugging Face 数据集卡](https://huggingface.co/datasets/agibot-world/AgiBotWorld-Beta)。
 Beta 使用 HDF5、MP4 与任务 JSON，与本项目已有的 AgiBotWorld2026 输入格式不同。
-转换入口为 `scripts/convert/agibotworld_beta.py`，运行方式见[转换说明](conversion.md)。
 
-## 仓库和子集结构
+### 仓库和子集结构
 
 上游状态文件和相机参数按全局 episode 范围打包为 TAR，视频按任务打包为 TAR：
 
@@ -45,7 +72,7 @@ inspection.json
 另有选择时检查的约 253 MiB 分片未匹配到状态，仍作为缓存保存在 `.archives/`。
 当前未提取 depth，也未下载 parameters。
 
-## HDF5 字段
+### HDF5 字段
 
 依据上游数据集卡，状态左右顺序均为左在前、右在后：
 
@@ -62,7 +89,7 @@ inspection.json
 HDF5 还包含关节、head、wrench 和 action 字段，部分数组为空。
 本次是双夹爪样本；上游另有 `state/effector/position` 为 `[N,12]` 的灵巧手样本。
 
-## RGB 与任务标注
+### RGB 与任务标注
 
 每条样本均有 8 路 AV1 MP4（PyAV 解码器名为 `libdav1d`），完整解码后各路帧数等于同集 `timestamp` 行数：
 
@@ -83,7 +110,9 @@ Beta 样本的 40 路视频全部解码后也与本集行数一致。
 正好对应目标契约的整集终点（最后采样时刻），也兼容上游将整集终点写为 N 的形式。
 空白处使用 `task_name`，空的 `action_text` 不替代任务文本；重叠或越界的有效标注报错。
 
-## 固定参考系与 EEF 安装接口
+## 转换规则
+
+### 固定参考系与 EEF 安装接口
 
 本次真实样本的法兰位姿已经包含腰部运动，参考系为源底盘 base，而非 `arm_base_link`。
 独立核对采用[官方 G1_120s URDF](https://github.com/AgibotTech/genie_sim/blob/6ca11c7593ecf6b7dae58c28fd19f4a789a0dd46/source/geniesim_benchmark/src/geniesim_benchmark/app/robot_cfg/G1_120s/G1_120s.urdf)
@@ -121,7 +150,7 @@ right: [[0, 0,-1], [0, 1,0], [1,0,0]]
 可使用 `--eef-offset` 和左右 `--*-tool-rpy` 提供安装接口的实机标定后重导；
 独立 FK 回归验证法兰参考系，不代表完成安装接口的实机标定。
 
-## 实际夹爪方向和默认基准
+### 实际夹爪方向和默认基准
 
 第 881865 集第 0 帧左右实测约 35.73/35.11、控制值均为 0，腕部 RGB 显示张开；
 第 250 帧左手实测约 117.07、控制值为 1，RGB 显示抓住瓶身。
@@ -138,3 +167,25 @@ openness = clip((value - 120) / (35 - 120), 0, 1)
 提供 `--gripper-open`、`--gripper-closed` 覆盖该基准，参数单位与源读数一致；
 该线性标量表示执行器开合程度，不能当成精确指尖距离。跨夹爪型号/固件必须核对基准。
 灵巧手 `[N,12]` 不能满足目标的两路标量开度，转换整集 drop 并单独统计。
+
+### 发现与 episode ID
+
+支持下载器生成的子集与保留 `proprio_stats/<task>/<episode>`、`observations/<task>/<episode>`、
+`task_info/` 布局的完整解包数据；不直接扫描几十 GiB 的源 TAR。
+有 `subset_manifest.json` 时只处理其中的 episode，忽略 `.archives/` 缓存和其它探查文件。
+按任务逐个扫描；`--limit` 是候选 episode 数量，包含会被 drop 的 episode，在扫描时生效。
+episode ID 为 `task_<task_id>_episode_<episode_id>`。
+
+### 时间与视频
+
+HDF5 的整数纳秒 `timestamp` 用作四路 state 与各路 RGB 的采集时刻，不按 MP4 PTS 或 FPS 重建。
+源法兰已包含腰部运动，转换只组合实测底盘位姿及固定工具变换，不依赖机器人模型资产。
+原 MP4 完整解码再写 H.264，不保留音轨，帧数必须与 HDF5 行数相同。
+`action_config` 的指令帧区间映射到同一原始 clock；缺口使用整集任务文本。
+
+### 数据 drop
+
+已知源数据异常按整集 drop：缺 state、RGB 或任务标注，冲突标注，灵巧手 `[N,12]`，
+无效/非有限 state、时间倒退、无效位姿、视频损坏或帧数不符、重叠/越界的指令。
+完全相同的重复标注去重并保留轨迹；冲突仅影响对应 episode。
+`action/end` 的长度不参与导出校验，导出仍只使用实际 state。

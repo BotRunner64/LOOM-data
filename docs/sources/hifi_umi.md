@@ -1,9 +1,36 @@
-# HiFi-UMI-2K 源格式说明
+# HiFi-UMI-2K
+
+| | |
+|---|---|
+| 上游 | [simple-world-lab/HiFi-UMI-2K](https://huggingface.co/datasets/simple-world-lab/HiFi-UMI-2K) |
+| 数据集键 | `hifi_umi` |
+| 位姿来源 | 源记录的手部位姿（虚拟指尖系），平移到名义后端安装点 |
+| 机器人模型 | 不需要 |
+| 不合格的 episode | 报错，记为失败 |
+
+```bash
+loom-data download hifi_umi select --count 5
+loom-data download hifi_umi download
+loom-data convert run --dataset hifi_umi --workers 8
+```
+
+本数据源的选项（均可省略）：
+
+| 选项 | 含义 | 默认 |
+|---|---|---|
+| `--left-eef-offset X Y Z` | 左手安装点在 raw EE 系中的坐标，米 | `-0.12 0 0` |
+| `--right-eef-offset X Y Z` | 右手安装点在 raw EE 系中的坐标，米 | `-0.12 0 0` |
+| `--gripper-open-rad` | 全开时的单指角，弧度 | 35° |
+| `--gripper-closed-rad` | 闭合时的角度，弧度 | `0` |
+
+通用选项、并行与续跑见[使用说明](../usage.md)；输出格式见[导出契约](../contract/export-contract.md)。
+
+## 原始数据
 
 依据随数据下载的 `source/info.json`、`source/modality.json`，以及官方
 [数据集说明](https://huggingface.co/datasets/simple-world-lab/HiFi-UMI-2K)。
 
-## 文件组织与字段
+### 文件组织与字段
 
 原始发布按 `chunk-XXXX/part-YYYY/` shard 组织，每个 shard 是独立的 LeRobot v3 数据集；
 episode 编号只在 shard 内唯一。转换器可直接读取完整本地数据集：每个 shard 包含
@@ -11,7 +38,7 @@ episode 编号只在 shard 内唯一。转换器可直接读取完整本地数�
 `data/chunk-*/file-*.parquet` 与 `videos/<video_key>/chunk-*/file-*.mp4`。
 episode 元数据记录逐帧表的文件索引、全局行号区间，以及每路拼接视频的文件索引与时间区间。
 
-本项目下载器 `scripts/download/hifi_umi_subset.py` 选择一个 shard，
+`loom-data download hifi_umi` 选择一个 shard，
 将其中选定的 episode 拆为：
 
 ```text
@@ -33,7 +60,7 @@ dataset/raw/HiFi-UMI-2K/
 `task_index` 关联 `source/tasks.parquet` 的 `task_index` / `task`；episode 元数据
 中的 `tasks` 只列出任务文本，逐行归属以 `task_index` 为准。
 
-## 坐标系与夹爪
+### 坐标系与夹爪
 
 官方[坐标系说明](https://huggingface.co/datasets/simple-world-lab/HiFi-UMI-2K#-coordinate-frames)
 声明：两手原点在指尖，+X 沿指尖指向前方，+Y 向左，+Z 向上；手部轨迹表达在
@@ -42,7 +69,7 @@ dataset/raw/HiFi-UMI-2K/
 不把它当作随开合移动的实际指尖中点。该解释来自下述公开说明与真实样本交叉核验，
 不是来自尚未公开的上游位姿导出代码。
 
-### 刚体原点核验（2026-11-10）
+#### 刚体原点核验（2026-11-10）
 
 - [论文 §3.1.1 与 §3.3.2](https://arxiv.org/html/2607.25895)说明，手部轨迹由刚性安装的
   标记块跟踪恢复；编码器独立测量开合角。这支持刚体追踪，但单独不足以证明最终发布的
@@ -61,7 +88,7 @@ dataset/raw/HiFi-UMI-2K/
 `tests/fixtures/hifi_umi_rigid_frame_samples.json`。这是一项有来源和样本依据的工程判定；
 不宣称已经取得作者对所有批次的变换源码或逐套硬件标定。
 
-### 默认后端基准
+#### 默认后端基准
 
 采用沿虚拟指尖系 `-X` 后退 12 cm 的**名义虚拟安装点**：
 
@@ -85,7 +112,7 @@ R_world_mount = R_world_raw
 归一化直接除以该全开值，不将记录角度乘以 2，不使用 70° 作为分母。
 这一字段解释是本项目依据数据确定的约定；每条轨迹的观测极值不作为机械端点。
 
-## 时间和相机
+### 时间和相机
 
 `timestamp` 为 episode 相对秒数（float32）。公开 LeRobot 表已经对齐到每行一个
 视频帧，四路 state 与六路相机在这个发布格式中共用该行时间戳；原始传感器异步
@@ -97,3 +124,51 @@ R_world_mount = R_world_raw
 下载器输出已经是无音轨 H.264 MP4，帧数等于该 episode 的 `length`。
 源 MP4 的容器时间和 episode 元数据的 `from/to_timestamp` 用于切片定位，不能
 替代采样表中的时间戳。
+
+## 转换规则
+
+### 输入布局
+
+`--input-dir` 可以指向包含 `chunk-XXXX/part-YYYY/` 的完整下载根目录，也可以指向
+其中一个 `part-YYYY/`，或包含 `source/` 元数据与 `episodes/` 的子集目录。不直接读取远端数据。
+完整分片读取各自的 `meta/info.json`、`meta/modality.json`、`meta/tasks.parquet` 和
+`meta/episodes/**/*.parquet`，按元数据中的文件索引与数据范围读取逐帧表，并按六路
+视频各自的 `[from_timestamp, to_timestamp)` 截取拼接视频。从前一个关键帧开始解码，
+仅保留当前 episode 的显示帧，重新编码为 H.264（CRF 18、fast），校验时间区间与帧数。
+MP4 播放时间从零开始，输出 Parquet 时间戳仍来自原生 `timestamp`，不从视频 FPS 推算。
+完整数据输出 ID 为 `chunk_XXXX_part_YYYY_episode_NNNNNN`，避免分片内重复编号；子集沿用 `episode_NNNNNN`。
+完整数据按 shard 分配 worker：每个 worker 只缓存当前 shard 的一个数据文件所需列，六路视频逐路处理。
+
+### 位姿和夹爪
+
+- 只读 `observation.state`：右 EEF `0:9`、右夹爪 `9`、左 EEF `10:19`、左夹爪 `19`。
+- 保留米制单位、固定 world 参考系和原工具轴向；按 `p_mount = p_raw + R @ offset`
+  将机身固定的虚拟指尖原点移至名义后端安装点。左右手默认偏移均为 `[-0.12,0,0] m`，
+  对应沿工具 `-X` 后退 12 cm；不依赖开合角，不使用 `cos(angle)` 动态修正。
+  依据和适用限制见上文「坐标系与夹爪」。
+- 从原始旋转前两行恢复第三行，再按契约写出完整矩阵；不是将源 6D 数值直接透传，
+  也不是将整个旋转取逆。先用绝对容差 `1e-5` 检查行正交与单位长度，再用
+  Gram–Schmidt 消除 float32 舍入误差，输出位置加按列展平的旋转矩阵 `float64[12]`。
+- 夹爪按单指角处理，全开值固定采用 35°（约 `0.6108652382` rad），闭合值为 0，
+  直接以 `clip(angle / radians(35), 0, 1)` 归一化，不乘以 2。
+  两手及全部 episode 使用相同端点。覆盖端点时公式为
+  `clip((angle - closed_rad) / (open_rad - closed_rad), 0, 1)`。
+  有限越界值裁剪，非有限值报错；不按 episode 或 shard 的统计极值重标定。
+
+### 时间、视频和指令
+
+- 使用 `round(float(timestamp) * 1e9)` 转为 int64 纳秒；保留源 float32 的精度及
+  间隔，不根据 FPS 或行号重新生成时间。全部流统一减去首行时间。
+- 输出四张独立 state 表。源发布本身是同步行格式，转换不会虚构异步采样时刻。
+- 相机 ID 为去掉 `observation.images.` 后的固定名称。每个视频必须是仅含一个
+  H.264 视频流的 MP4；逐帧解码验证显示帧数和分辨率后逐字节复制，不再次有损编码。
+  帧索引为 `0..N-1`，其时间来自源表；视频容器 PTS 不参与采样时刻计算。
+- 按逐行 `task_index` 的变化生成指令区间。第一条从共同零点开始，末段终点为最后
+  样本时间；同一时刻最后一个任务生效，零时长区间省略，相同文本连续行合并。
+
+### 校验
+
+检查源 embodiment/布局、episode 身份和长度、连续帧号/全局行号、任务映射、全部
+六路相机和视频帧数。空轨迹、零时长、时间倒退、缺失文件、非有限值、无效旋转均报错。
+任何 `observation.state_valid` 或 `valid.frame` 非 true 的 episode 都拒绝转换（记为失败）；当前实现
+不删除、补齐或插值这些样本，避免丢弃有效性标记后将前值填充/黑帧误作正常观测。

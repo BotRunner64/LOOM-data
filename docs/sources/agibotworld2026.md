@@ -1,4 +1,30 @@
-# AgiBot World 2026 源数据契约
+# AgiBot World 2026
+
+| | |
+|---|---|
+| 上游 | [agibot-world/AgiBotWorld2026](https://huggingface.co/datasets/agibot-world/AgiBotWorld2026) |
+| 数据集键 | `agibotworld2026` |
+| 位姿来源 | 源记录的法兰位姿，经腰部 FK 和底盘位姿变换到固定参考系 |
+| 机器人模型 | `assets/robot_models/agibot_g2`（只用腰部链） |
+| 不合格的 episode | 报错，记为失败 |
+
+```bash
+loom-data download agibotworld2026 select --count 5
+loom-data download agibotworld2026 download
+loom-data convert run --dataset agibotworld2026 --workers 8
+```
+
+本数据源的选项（均可省略）：
+
+| 选项 | 含义 | 默认 |
+|---|---|---|
+| `--eef-offset X Y Z` | 安装接口在源法兰系中的坐标，米 | `0 0 0` |
+
+输入是 `.tar.gz` 归档（或含归档的目录），一个归档含多个 episode。`--limit N` 取前 N 个归档，`--limit-episodes N` 取跨归档的前 N 个 episode。大归档会被顺序读取多次，工作目录需要容纳单路源 MP4 的空间。
+
+通用选项、并行与续跑见[使用说明](../usage.md)；输出格式见[导出契约](../contract/export-contract.md)。
+
+## 原始数据
 
 本项目下载的 `ImitationLearning/CommercialSpaces/task_*/<起止帧>.tar.gz` 是各自独立的 LeRobot v2.1 数据集。以下记录的是已下载版本的实际结构与转换所用字段；源数据版本见 `dataset/raw/AgiBotWorld2026/subset_manifest.json`。
 
@@ -9,7 +35,9 @@
 
 转换读取实测夹爪 `state/left_effector/position`、`state/right_effector/position`，双臂末端 `state/end/arm_position`（左 xyz、右 xyz，米）和 `state/end/arm_orientation`（左 xyzw、右 xyzw），`state/waist/position` 的 5 个腰部关节，以及存在时的 `state/robot/position` 和 `state/robot/orientation`（xyzw）。不把 `action` 写入目标格式。
 
-### 末端参考系与工具变换
+## 转换规则
+
+#### 末端参考系与工具变换
 
 `state/end/arm_*` 按相对 `arm_base_link` 的法兰位姿解释。依据是[官方 G2 IK/FK 工具的坐标约定](https://github.com/AgibotTech/genie_sim/blob/6ca11c7593ecf6b7dae58c28fd19f4a789a0dd46/source/geniesim_benchmark/src/geniesim_benchmark/utils/g2_ikfk_converter.py)以及本地数据交叉核验：源末端左乘腰部 FK 后，源腕部相机相对法兰的位置在第 1 集每 10 帧抽样中，各分量标准差小于 `4e-8 m`。这验证源字段与腰部链的相容性，并不证明相机或 TCP 已对真实图像精确标定。
 
@@ -41,4 +69,10 @@ EEF 原点采用源法兰的安装基准，`p_flange_eef = [0,0,0] m`；保留�
 
 完整模仿学习数据中还存在底盘字段有索引、但底盘位置和四元数一起全零的缺失记录。例如 `task_3777/368929_370517.tar.gz` 的 `episode_000001` 整集全零；`task_3402/375260_377477.tar.gz` 的 `episode_000056` 则前 1655 帧有有效位姿，后 858 帧全零。根据该批数据的使用者确认，未移动的底盘可能不记录位姿；转换器验证整集底盘速度命令全零后，整集缺失时使用固定底盘参考系，部分缺失时沿用之前最近的实测底盘位姿（开头缺失时使用首个实测位姿）。有效实测位姿保留；位置非零而四元数全零、其它无效四元数或缺失位姿时底盘速度命令非零的情况仍报错。
 
-源格式说明：[AgiBot World 2026 官方数据页](https://huggingface.co/datasets/agibot-world/AgiBotWorld2026)。
+回归测试使用第 1 集的 6 个真实源采样，检查腕部相机相对导出工具的刚性关系；另检查工具轴、移动底盘组合及开合方向。刚性检查无法验证安装接口的实机标定本身。
+
+#### 为什么初始视角对齐后仍可能与视频不同
+
+导出 state 在固定参考系，`top_head` 却是移动相机。第 1 集源外参每 10 帧抽样显示，相机相对首帧最大平移约 `0.47 m`、旋转约 `91°`。viewer 手动调整一次视角只能对齐某一时刻；严格图像对齐需要每帧的相机外参和内参。目标契约不包含这些标定，当前 viewer 也未按源相机运动驱动观察视角。不能将 state 改成随动头部系来消除这一差异，那会违反固定参考系要求。
+
+所有 state 与 RGB 均使用源 Parquet 的 `timestamp` 列，转为纳秒并共享本集共同零点，不按视频 FPS 推算。每路 RGB 视频逐帧解码后用 libx264 编成无音轨 H.264；深度视频不导出。源视频每集每路必须与 Parquet 行数一致。`default` 指令分段按源帧边界映射到源时间戳；缺口用整集任务文本填充。

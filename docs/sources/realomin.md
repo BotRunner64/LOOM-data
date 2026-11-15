@@ -1,11 +1,33 @@
-# 10Kh-RealOmin-OpenData 源数据说明
+# 10Kh-RealOmin-OpenData
 
-上游：[Hugging Face 数据集卡](https://huggingface.co/datasets/genrobot2025/10Kh-RealOmin-OpenData)、
-[官方读取工具 das-datakit](https://github.com/genrobot-ai/das-datakit)。
-转换入口为 `scripts/convert/realomin.py`；运行方式见[转换说明](conversion.md)。
-下文区分原始字段、默认模型几何映射及尚未取得的实机标定。
+| | |
+|---|---|
+| 上游 | [genrobot2025/10Kh-RealOmin-OpenData](https://huggingface.co/datasets/genrobot2025/10Kh-RealOmin-OpenData)（[官方读取工具](https://github.com/genrobot-ai/das-datakit)） |
+| 数据集键 | `realomin` |
+| 位姿来源 | 源记录的 VIO 位姿，乘固定工具变换 |
+| 机器人模型 | 不需要 |
+| 不合格的 episode | 源数据异常整集 drop 并记录原因；程序和磁盘错误仍记为失败 |
 
-## 文件与本地子集
+```bash
+loom-data download realomin select --count 5
+loom-data download realomin download
+loom-data convert run --dataset realomin --workers 8
+```
+
+本数据源的选项（均可省略）：
+
+| 选项 | 含义 | 默认 |
+|---|---|---|
+| `--eef-offset X Y Z` | 安装接口在 raw EE 系中的坐标，米 | 模型推导的 V3 后端安装点 |
+| `--tool-rpy R P Y` | 规范工具轴相对 raw EE 的旋转，弧度 | `0 -π/12 0` |
+| `--gripper-open / --gripper-closed` | 全开 / 闭合时的源读数，米 | `0.103` / `0` |
+| `--instruction TEXT` | 所有 episode 使用的任务文本 | 路径中的技能名 |
+
+通用选项、并行与续跑见[使用说明](../usage.md)；输出格式见[导出契约](../contract/export-contract.md)。
+
+## 原始数据
+
+### 文件与本地子集
 
 一条轨迹对应一个 MCAP 文件，消息使用 Protobuf，schema 嵌入 MCAP。
 原始目录按场景、技能及采集分组组织，夹爪资产为根目录的 `DAS_Gripper_V3.zip`。
@@ -25,7 +47,7 @@
 `subset_manifest.json` 记录固定版本、源路径与字节数；`inspection.json` 保存本地检查结果。
 样本及夹爪资产共约 304 MiB。
 
-## 原始字段
+### 原始字段
 
 上游约定 `robot0` 为左夹爪，`robot1` 为右夹爪。两者各有以下消息：
 
@@ -41,7 +63,7 @@
 但样本 `camera_info.width/height` 为 640×480；转换 RGB 时须以解码帧尺寸为准，
 标定参数与实际图像分辨率的对应关系需另行核对。位姿、开度与图像消息数量不相同。
 
-## 时间与坐标
+### 时间与坐标
 
 实际样本的 `header.timestamp` 是约 `1.765e18` 的整数纳秒。
 转换读取 `header.timestamp`，不以 MCAP `log_time/publish_time` 替代，不转为浮点秒。
@@ -56,12 +78,14 @@
 将 `eef_pose` 定义为设备在固定 VIO 世界系下的位姿，局部原点为中央相机光心，X 向前、Y 向左、Z 向上；
 世界原点取初始相机中心，Z 反重力。转换保留各手原生世界系，不要求重建左右手之间的外参。
 
-## 安装接口变换与开度
+## 转换规则
+
+### 安装接口变换与开度
 
 目标 EEF 原点采用 V3 夹爪后端的名义安装点，轴向沿用原有定义。
 转换仍为 `T_world_eef = T_world_raw · T_raw_eef`，不依赖夹爪开度或指尖长度。
 
-### 模型依据与坐标注册
+#### 模型依据与坐标注册
 
 模型来自厂商公开的 [DAS-Gripper Version Changelog](https://zcnma1sv5kma.feishu.cn/wiki/CKpbwye45iOlrckukIPc5hKCndh)
 中 V3 行的两个附件：
@@ -105,12 +129,12 @@ R_raw_eef = Ry(-15°)
 `--eef-offset X Y Z`、`--tool-rpy R P Y` 覆盖。无需为了转换而先完成逐套实机标定。
 `camera_info` 的图像分辨率及外参问题仍应独立核对。
 
-### 复算
+#### 复算
 
-下载并解压上面两个附件后，在项目根目录运行：
+下载并解压上面两个附件后运行：
 
 ```bash
-python scripts/robot/realomin_mount.py \
+loom-data robot realomin-mount \
   --gripper-urdf /path/to/DAS_Gripper_V3/urdf/DAS_Gripper_V3.urdf \
   --controller-urdf /path/to/DAS_Controller_V3_with_flange/urdf/DAS_Controller_V3_with_flange.urdf
 ```
@@ -126,3 +150,24 @@ URDF 的 SHA-256。固定关节数值与附件哈希保存在
 
 指令默认取最近的非数字父目录技能名，将下划线换为空格；这属于源技能标签，
 不是额外生成的逐帧语言标注。可用 `--instruction` 指定已有的任务文本。
+
+### 发现与 episode ID
+
+默认读取 `dataset/raw/10Kh-RealOmin-OpenData/`；完整数据在别处时用 `--input-dir` 指定。
+有 `subset_manifest.json` 时只处理清单里的 MCAP；
+完整数据目录没有该清单时递归枚举 MCAP。episode ID 是源相对路径的稳定 SHA-256 前 16 位，
+不会因不同技能下有同名 `00001.mcap` 而发生碰撞。修改数据根的相对目录结构会改变 ID。
+扫描排除隐藏缓存目录；`--limit` 按候选 episode 计数，在扫描过程中生效。
+
+### 视频
+
+使用 MCAP 内嵌 Protobuf schema；双臂位姿、磁编码器和全部 `robot0/1` 相机消息按原生时刻分别输出。
+逐条 H.264 消息解码并统一编码无音轨 MP4，保留消息与显示帧的一一对应关系；
+消息数量、视频帧数不一致或显示帧对应时间递减时报错。RGB 使用实际解码尺寸，不依赖旧 `camera_info` 尺寸。
+
+### 数据 drop
+
+非有限 state、缺失四路 state、没有 RGB、无效 world 位姿、时间倒退、损坏 MCAP/视频及
+视频消息与帧数/时间映射不一致均整集 drop。夹爪轻微越界仍裁剪。
+Stage 2 的数字目录没有细粒度技能名，保留源场景名 `Clutter Tidy-Up [Stage2]` 作为指令，
+不生成额外的技能标签。
