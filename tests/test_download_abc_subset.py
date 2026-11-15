@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import httpx
 from huggingface_hub.hf_api import RepoFile, RepoFolder
 
-from scripts.download import abc_subset as script
+from loom_data.download import abc_subset as script
 
 
 SHA = 'a' * 40

@@ -20,8 +20,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert import abc130k, agibotworld2026, export_common, parallel
-from scripts.convert.parallel_adapters import Adapter, make_config
+from loom_data.convert import abc130k, agibotworld2026, export_common, parallel
+from loom_data.convert.parallel_adapters import Adapter, make_config
 from test_convert_hifi_umi import make_source as hifi_source, make_shard as hifi_shard
 from test_convert_molmoact2 import make_source as molmo_source, make_full_source as molmo_full_source
 import test_convert_galaxea as galaxea_tests
@@ -81,7 +81,7 @@ class HifiShardTests(unittest.TestCase):
             store = parallel.prepare(config, output)
             self.assertEqual(len(store.plan['tasks']), 2)
             self.assertEqual(len(store.ids), 4)
-            from scripts.convert import hifi_umi
+            from loom_data.convert import hifi_umi
             extract = hifi_umi.extract_video_segment
 
             def interrupted(video, *args):
@@ -390,7 +390,7 @@ class ResumeTests(unittest.TestCase):
     def test_real_local_processes_and_idempotent_cli(self):
         add_hifi_episode(self.source, 8)
         output = self.root / 'processes'
-        command = [sys.executable, '-m', 'scripts.convert.parallel', 'run', '--dataset', 'hifi_umi',
+        command = [sys.executable, '-m', 'loom_data.convert.parallel', 'run', '--dataset', 'hifi_umi',
                    '--input-dir', str(self.source), '--output-dir', str(output), '--left-eef-offset', '0', '0', '0', '--right-eef-offset', '0', '0', '0']
         for count in (2, 3):
             result = subprocess.run([*command, '--workers', str(count)], cwd=parallel.ROOT,
@@ -404,7 +404,7 @@ class ResumeTests(unittest.TestCase):
     def test_cli_input_check_failure_keeps_task_and_traceback(self):
         source_file = self.source / 'episodes' / self.episode_id / 'episode.json'
         source_file.write_text(source_file.read_text() + ' ')
-        command = [sys.executable, '-m', 'scripts.convert.parallel', 'worker',
+        command = [sys.executable, '-m', 'loom_data.convert.parallel', 'worker',
                    '--output-dir', str(self.output), '--worker-id', '0', '--worker-count', '1']
         for _ in range(2):
             result = subprocess.run(command, cwd=parallel.ROOT, capture_output=True,
@@ -423,7 +423,7 @@ class ResumeTests(unittest.TestCase):
         output = self.root / 'not_prepared'
         env = {k: v for k, v in os.environ.items() if not k.startswith('SLURM_')}
         result = subprocess.run(
-            [sys.executable, '-m', 'scripts.convert.parallel', 'worker', '--output-dir', str(output)],
+            [sys.executable, '-m', 'loom_data.convert.parallel', 'worker', '--output-dir', str(output)],
             env=env, cwd=parallel.ROOT, capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(result.returncode, 1, result.stderr)
         log, = output.with_name(output.name + '.work').glob('logs/worker-*.err')
@@ -436,7 +436,7 @@ class ResumeTests(unittest.TestCase):
         code = '''
 import sys
 from unittest.mock import patch
-from scripts.convert import parallel
+from loom_data.convert import parallel
 kind = sys.argv.pop()
 error = ImportError('injected dependency failure') if kind == 'import' else KeyboardInterrupt()
 with patch.object(parallel, 'configure_worker', side_effect=error):
@@ -458,7 +458,7 @@ with patch.object(parallel, 'configure_worker', side_effect=error):
         code = '''
 import os, resource, sys
 from unittest.mock import patch
-from scripts.convert import parallel
+from loom_data.convert import parallel
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 with patch.object(parallel, 'configure_worker', side_effect=os.abort):
     sys.exit(parallel.main())
@@ -477,7 +477,7 @@ with patch.object(parallel, 'configure_worker', side_effect=os.abort):
         code = '''
 import os, signal, sys
 from unittest.mock import patch
-from scripts.convert import parallel
+from loom_data.convert import parallel
 original = parallel.atomic_json
 def committed_record(path, value):
     original(path, value)
@@ -508,7 +508,7 @@ with patch.object(parallel, 'atomic_json', side_effect=committed_record):
             env.pop('SLURM_NTASKS', None)
             if rank is not None:
                 env.update(SLURM_PROCID=str(rank), SLURM_NTASKS=str(count))
-            return subprocess.run([sys.executable, '-m', 'scripts.convert.parallel', *args],
+            return subprocess.run([sys.executable, '-m', 'loom_data.convert.parallel', *args],
                                   env=env, cwd=parallel.ROOT, capture_output=True,
                                   text=True, timeout=60, check=False)
 
@@ -548,7 +548,7 @@ class SourceAdapterTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def test_molmo_real_conversion_matches_standalone(self):
-        from scripts.convert import molmoact2
+        from loom_data.convert import molmoact2
         source = self.root / 'raw'
         molmo_source(source)
         output = self.root / 'parallel'
@@ -564,7 +564,7 @@ class SourceAdapterTests(unittest.TestCase):
 
     @unittest.skipUnless('libsvtav1' in av.codecs_available, 'AV1 encoder required')
     def test_molmo_full_dataset_resume_and_standalone_match(self):
-        from scripts.convert import molmoact2
+        from loom_data.convert import molmoact2
         source = molmo_full_source(self.root / 'raw')
         output = self.root / 'parallel'
         config = make_config('molmoact2', source)
@@ -605,7 +605,7 @@ class SourceAdapterTests(unittest.TestCase):
 
     @unittest.skipUnless('libsvtav1' in av.codecs_available, 'AV1 encoder required')
     def test_molmo_full_dataset_limits_and_bad_video_range_are_episode_local(self):
-        from scripts.convert import molmoact2
+        from loom_data.convert import molmoact2
         source = molmo_full_source(self.root / 'raw')
         meta = source / 'meta/episodes/chunk-000/file-000.parquet'
         rows = pq.read_table(meta).to_pylist()
@@ -688,7 +688,7 @@ class SourceAdapterTests(unittest.TestCase):
         self.assertFalse(output.with_name('out.work').exists())
 
     def test_serial_codec_configuration_applies_to_encoder_and_decoder(self):
-        with patch.dict(os.environ, {'ROBOT_DATA_HUB_SERIAL_CODECS': '1'}):
+        with patch.dict(os.environ, {'LOOM_DATA_SERIAL_CODECS': '1'}):
             decoder = export_common.create_video_decoder('h264')
             self.assertEqual(decoder.thread_count, 1)
             encoder = av.CodecContext.create('libx264', 'w')

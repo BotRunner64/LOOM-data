@@ -10,9 +10,9 @@ import h5py
 import numpy as np
 import pyarrow.parquet as pq
 
-from scripts.convert import agibotworld_beta as script
-from scripts.convert.export_common import tool_transform
-from scripts.convert.export_validation import validate_episode
+from loom_data.convert import agibotworld_beta as script
+from loom_data.convert.export_common import tool_transform
+from loom_data.convert.export_validation import validate_episode
 
 
 def make_source(root):
@@ -139,8 +139,8 @@ class BetaExportTests(unittest.TestCase):
             self.assertFalse(list(root.glob('.out-*')))
 
     def test_parallel_adapter_publishes_and_resumes(self):
-        from scripts.convert import parallel
-        from scripts.convert.parallel_adapters import make_config
+        from loom_data.convert import parallel
+        from loom_data.convert.parallel_adapters import make_config
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);make_source(root/'raw')
             config=make_config('agibotworld_beta',root/'raw')

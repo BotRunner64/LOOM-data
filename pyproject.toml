@@ -1,7 +1,7 @@
 [project]
-name = "robot-data-hub"
+name = "loom-data"
 version = "0.1.0"
-description = "Robot dataset selection and download tools"
+description = "Convert robot datasets to one export contract, then check and view them"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,5 +26,8 @@ viewer = ["pillow>=10"]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = []
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+loom_data = ["viewer/*.html", "viewer/*.js", "viewer/vendor/*"]

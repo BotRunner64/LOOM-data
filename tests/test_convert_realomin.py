@@ -11,10 +11,10 @@ import av
 import numpy as np
 import pyarrow.parquet as pq
 
-from scripts.convert import realomin as script
-from scripts.convert.export_common import tool_transform
-from scripts.convert.export_validation import validate_episode
-from scripts.robot.realomin_mount import mounting_geometry
+from loom_data.convert import realomin as script
+from loom_data.convert.export_common import tool_transform
+from loom_data.convert.export_validation import validate_episode
+from loom_data.robot.realomin_mount import mounting_geometry
 
 
 def geometry_urdfs(root):
@@ -72,8 +72,8 @@ class RealOminTests(unittest.TestCase):
                                                  - geometry['eef_offset']), .01, places=10)
 
     def test_nominal_mount_is_used_by_direct_serial_parallel_and_cli_exports(self):
-        from scripts.convert import parallel
-        from scripts.convert.parallel_adapters import make_config
+        from loom_data.convert import parallel
+        from loom_data.convert.parallel_adapters import make_config
         import subprocess
         import sys
         records = []
@@ -117,7 +117,7 @@ class RealOminTests(unittest.TestCase):
             bad = root / 'bad/clean_bowl/1.mcap'
             bad.parent.mkdir(parents=True)
             bad.write_bytes(b'bad MCAP')
-            result = subprocess.run([sys.executable, '-m', 'scripts.convert.realomin',
+            result = subprocess.run([sys.executable, '-m', 'loom_data.convert.realomin',
                                      '--input-dir', str(root / 'bad'), '--output-dir', str(root / 'cli')],
                                     cwd=script.ROOT, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -206,8 +206,8 @@ class RealOminTests(unittest.TestCase):
             self.assertFalse(list(root.glob('.out-*')))
 
     def test_parallel_adapter_keeps_calibration_and_resumes_native_mcap(self):
-        from scripts.convert import parallel
-        from scripts.convert.parallel_adapters import make_config
+        from loom_data.convert import parallel
+        from loom_data.convert.parallel_adapters import make_config
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root/'raw/clean_bowl/1/1.mcap'

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {test} from 'node:test';
 
-const source = await readFile(new URL('../scripts/viewer/episodes.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../src/loom_data/viewer/episodes.js', import.meta.url), 'utf8');
 const {EpisodeBrowser} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 
 // Minimal DOM boundary; requests can complete out of order even after cancellation.

@@ -11,9 +11,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert import molmoact2 as script
-from scripts.robot.kinematics import fk_poses
-from scripts.robot.urdf_model import parse_urdf
+from loom_data.convert import molmoact2 as script
+from loom_data.robot.kinematics import fk_poses
+from loom_data.robot.urdf_model import parse_urdf
 
 MODEL = script.ROOT / 'assets/robot_models/yam'
 

@@ -12,9 +12,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.check import anomaly_detection as detector
-from scripts.check import parallel
-from scripts.convert.export_common import write_state, write_video_index
+from loom_data.check import anomaly_detection as detector
+from loom_data.check import parallel
+from loom_data.convert.export_common import write_state, write_video_index
 
 
 class ParallelDetectionTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class ParallelDetectionTests(unittest.TestCase):
         self.manifest.write_text(''.join('\n' + json.dumps(r) + '\n' for r in self.records))
 
     def cli(self, *args, env=None, direct=False):
-        entry = ['scripts/check/parallel.py'] if direct else ['-m', 'scripts.check.parallel']
+        entry = ['src/loom_data/check/parallel.py'] if direct else ['-m', 'loom_data.check.parallel']
         return subprocess.run([sys.executable, *entry, *args, '--input-dir', str(self.root)],
                               cwd=parallel.ROOT, env=env, capture_output=True, text=True, check=False)
 

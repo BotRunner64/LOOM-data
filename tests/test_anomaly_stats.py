@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.check.anomaly_stats import main, summarize_dataset
+from loom_data.check.anomaly_stats import main, summarize_dataset
 
 
 class AnomalyStatsTests(unittest.TestCase):
@@ -88,7 +88,7 @@ class AnomalyStatsTests(unittest.TestCase):
     def test_custom_report_and_both_entrypoints(self):
         custom = self.parent / 'custom.jsonl'
         custom.write_text(json.dumps(self.records[-1]))
-        for entry in (['scripts/check/anomaly_stats.py'], ['-m', 'scripts.check.anomaly_stats']):
+        for entry in (['src/loom_data/check/anomaly_stats.py'], ['-m', 'loom_data.check.anomaly_stats']):
             with self.subTest(entry=entry):
                 result = subprocess.run(
                     [sys.executable, *entry, str(self.root), '--anomalies', str(custom),
@@ -136,7 +136,7 @@ class AnomalyStatsTests(unittest.TestCase):
 
     def test_interrupt_is_clean(self):
         with contextlib.redirect_stdout(StringIO()), contextlib.redirect_stderr(StringIO()), patch(
-                'scripts.check.anomaly_stats.summarize_dataset', side_effect=KeyboardInterrupt):
+                'loom_data.check.anomaly_stats.summarize_dataset', side_effect=KeyboardInterrupt):
             with self.assertRaises(SystemExit) as raised:
                 main([str(self.root)])
         self.assertEqual(raised.exception.code, 130)

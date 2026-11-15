@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from scripts.viewer.export_viewer import (
+from loom_data.viewer.export_viewer import (
     FrameReader, ManifestIndex, read_anomalies, read_dataset, read_episode, serve,
 )
 
@@ -68,7 +68,7 @@ class ExportViewerTests(unittest.TestCase):
                 handler.reply = lambda *args: results.append(args)
                 handler.do_GET()
 
-        with patch('scripts.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
+        with patch('loom_data.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
             serve(self.root, '127.0.0.1', 8765, report)
         return results[0]
 
@@ -234,7 +234,7 @@ class ExportViewerTests(unittest.TestCase):
                 handler.wfile = SimpleNamespace(write=Mock(side_effect=BrokenPipeError))
                 handler.reply(200, b'image', 'image/jpeg')
 
-        with patch('scripts.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
+        with patch('loom_data.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
             serve(self.root, '127.0.0.1', 8765)
 
     def test_frame_reader_uses_threaded_decode_and_requested_width(self):
@@ -333,7 +333,7 @@ class ExportViewerTests(unittest.TestCase):
                     handler.do_GET()
                     results[path] = handler.reply.call_args.args
 
-        with patch('scripts.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
+        with patch('loom_data.viewer.export_viewer.ThreadingHTTPServer', FakeServer):
             serve(self.root, '127.0.0.1', 8765)
         self.assertIn(b'type="module"', results['/'][1])
         for path in ('/pose3d.js', '/anomalies.js', '/episodes.js', '/vendor/three.module.min.js', '/vendor/three.core.min.js'):

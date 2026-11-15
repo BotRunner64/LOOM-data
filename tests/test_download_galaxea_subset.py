@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import httpx
 
-from scripts.download import galaxea_subset as script
+from loom_data.download import galaxea_subset as script
 
 
 SHA = 'a' * 40

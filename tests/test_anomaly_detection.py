@@ -10,8 +10,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.check import anomaly_detection as script
-from scripts.convert.export_common import write_state, write_video_index
+from loom_data.check import anomaly_detection as script
+from loom_data.convert.export_common import write_state, write_video_index
 
 
 def stream(seconds, positions=None, angles=None, openness=None):
@@ -366,7 +366,7 @@ class DatasetTests(unittest.TestCase):
 
     def test_cli_both_entrypoints_and_threshold_override(self):
         repo = Path(__file__).resolve().parents[1]
-        for entry in (['scripts/check/anomaly_detection.py'], ['-m', 'scripts.check.anomaly_detection']):
+        for entry in (['src/loom_data/check/anomaly_detection.py'], ['-m', 'loom_data.check.anomaly_detection']):
             result = subprocess.run([sys.executable, *entry, str(self.root), '--max-boundary-idle-s', '5'],
                                     cwd=repo, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

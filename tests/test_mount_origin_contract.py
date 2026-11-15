@@ -8,10 +8,10 @@ import unittest
 import numpy as np
 import pyarrow.parquet as pq
 
-from scripts.convert import hifi_umi, parallel, realomin
-from scripts.convert.export_validation import validate_episode
-from scripts.convert.parallel_adapters import make_config
-from scripts.robot.kinematics import rpy_matrix
+from loom_data.convert import hifi_umi, parallel, realomin
+from loom_data.convert.export_validation import validate_episode
+from loom_data.convert.parallel_adapters import make_config
+from loom_data.robot.kinematics import rpy_matrix
 from test_convert_hifi_umi import make_source, make_shard
 
 
@@ -92,7 +92,7 @@ class MountOriginTests(unittest.TestCase):
                             np.testing.assert_allclose(np.array(table['pose'].to_pylist())[:, :3],
                                                        np.tile(expected[side], (table.num_rows, 1)), atol=1e-7)
                 if layout == 'subset':
-                    command = [sys.executable, '-m', 'scripts.convert.hifi_umi',
+                    command = [sys.executable, '-m', 'loom_data.convert.hifi_umi',
                                '--input-dir', str(root / 'raw'), '--output-dir', str(root / 'cli')]
                     result = subprocess.run(command, cwd=hifi_umi.ROOT, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

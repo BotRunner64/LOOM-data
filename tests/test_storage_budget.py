@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.convert import parallel
-from scripts.convert.parallel_adapters import make_config
-from scripts.convert.storage_budget import sample_tasks, storage_bytes
+from loom_data.convert import parallel
+from loom_data.convert.parallel_adapters import make_config
+from loom_data.convert.storage_budget import sample_tasks, storage_bytes
 from test_convert_hifi_umi import make_source, make_shard
 from test_parallel_conversion import add_hifi_episode, manifest
 
@@ -116,7 +116,7 @@ class StorageBudgetPlanTests(unittest.TestCase):
         self.assertFalse((serial.work / 'storage_budget.json').exists())
         self.assertFalse((serial.work / 'storage_budget.lock').exists())
         parallel.prepare(config, serial_output)
-        with patch('scripts.convert.parallel_adapters.discover', side_effect=AssertionError('must reuse plan')):
+        with patch('loom_data.convert.parallel_adapters.discover', side_effect=AssertionError('must reuse plan')):
             parallel.prepare(config, serial_output)
         before = {p: p.stat().st_mtime_ns for p in serial_output.rglob('*') if p.is_file()}
         parallel.run(config, serial_output, workers=2)
@@ -154,7 +154,7 @@ class StorageBudgetPlanTests(unittest.TestCase):
     def test_all_source_clis_forward_budget_options(self):
         for dataset in parallel.DATASETS:
             with self.subTest(dataset=dataset), patch.object(parallel, 'run_native') as run:
-                module = importlib.import_module(f'scripts.convert.{dataset}')
+                module = importlib.import_module(f'loom_data.convert.{dataset}')
                 argv = [dataset, '--input-dir', str(self.source), '--output-dir', str(self.root / dataset),
                         '--storage-budget', '1.5GiB', '--sample-seed', '42', '--storage-estimate-ratio', '2']
                 with patch.object(sys, 'argv', argv):

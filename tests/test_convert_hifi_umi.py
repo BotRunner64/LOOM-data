@@ -11,7 +11,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert import hifi_umi as script
+from loom_data.convert import hifi_umi as script
 
 
 def make_source(root, frames=4):
@@ -195,7 +195,7 @@ class HifiUmiTests(unittest.TestCase):
 
     def test_rotation_is_repacked_not_transposed_and_preserves_body_delta(self):
         # A non-axis-aligned rotation catches mistakes hidden by identity poses.
-        from scripts.robot.kinematics import rpy_matrix
+        from loom_data.robot.kinematics import rpy_matrix
         rotation = rpy_matrix([.2, -.4, .7])
         source = np.r_[1, 2, 3, rotation[:2].ravel()]
         pose = script.poses_from_rows([source], eef_offset=[0., 0., 0.])[0]

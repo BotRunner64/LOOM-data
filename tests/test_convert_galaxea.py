@@ -10,13 +10,13 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert.galaxea import (
+from loom_data.convert.galaxea import (
     ROOT, DEFAULT_EEF_OFFSETS, TOOL_AXES, GalaxeaKinematics, convert,
     instruction_segments, is_stationary, openness, source_path, validate_source,
 )
-from scripts.convert.export_common import pose_matrix, transcode_video
-from scripts.robot.kinematics import fk_poses
-from scripts.robot.urdf_model import parse_urdf
+from loom_data.convert.export_common import pose_matrix, transcode_video
+from loom_data.robot.kinematics import fk_poses
+from loom_data.robot.urdf_model import parse_urdf
 
 
 def source_info(kind):
