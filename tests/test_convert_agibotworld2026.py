@@ -10,8 +10,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert.agibotworld2026 import (
-    G2FK, ROOT, STATE_FIELDS, pose_matrix,
+from support import MODELS
+from loom_data.sources.agibotworld2026 import (
+    G2FK, STATE_FIELDS, pose_matrix,
     camera_id, instructions, openness, read_episode, seconds_to_ns, source_fields,
     verify_stationary_base,
 )
@@ -77,10 +78,10 @@ class AgibotWorld2026MappingTests(unittest.TestCase):
             verify_stationary_base(info, [[4, 0, 5, math.nan]])
 
 
-@unittest.skipUnless((ROOT / 'assets/robot_models/agibot_g2/robot.json').exists(), 'G2 model assets absent')
+@unittest.skipUnless((MODELS / 'agibot_g2/robot.json').exists(), 'G2 model assets absent')
 class AgibotWorld2026PoseTests(unittest.TestCase):
     def setUp(self):
-        self.fk = G2FK(ROOT / 'assets/robot_models/agibot_g2')
+        self.fk = G2FK(MODELS / 'agibot_g2')
         self.samples = json.loads((Path(__file__).parent / 'fixtures/agibotworld2026_pose_samples.json').read_text())['samples']
 
     @staticmethod
@@ -98,7 +99,7 @@ class AgibotWorld2026PoseTests(unittest.TestCase):
         self.assertAlmostEqual(np.linalg.det(self.fk.axes), 1)
 
     def test_origin_stays_at_recorded_flange_without_finger_length(self):
-        from scripts.robot.kinematics import fk_poses
+        from loom_data.robot.kinematics import fk_poses
         for sample in self.samples:
             state, indices = self.pack(sample)
             waist = dict(zip((f'body_joint{i}' for i in range(1, 6)), sample['state/waist/position']))

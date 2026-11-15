@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.check.anomaly_stats import main, summarize_dataset
+from loom_data.check.anomaly_stats import main, summarize_dataset
 
 
 class AnomalyStatsTests(unittest.TestCase):
@@ -85,19 +85,16 @@ class AnomalyStatsTests(unittest.TestCase):
         self.assertEqual(report['total']['affected_episode_count'], 3)
         self.assertEqual(report['total']['by_reason']['internal_idle']['affected_episode_count'], 2)
 
-    def test_custom_report_and_both_entrypoints(self):
+    def test_custom_report_through_the_cli(self):
         custom = self.parent / 'custom.jsonl'
         custom.write_text(json.dumps(self.records[-1]))
-        for entry in (['scripts/check/anomaly_stats.py'], ['-m', 'scripts.check.anomaly_stats']):
-            with self.subTest(entry=entry):
-                result = subprocess.run(
-                    [sys.executable, *entry, str(self.root), '--anomalies', str(custom),
-                     '--json'], cwd=Path(__file__).resolve().parents[1],
-                    text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                report = json.loads(result.stdout)
-                self.assertEqual(report['total']['record_count'], 1)
-                self.assertEqual(report['total']['by_reason']['state_jump']['affected_episode_count'], 1)
+        result = subprocess.run(
+            [sys.executable, '-m', 'loom_data', 'anomaly-stats', str(self.root), '--anomalies', str(custom), '--json'],
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['total']['record_count'], 1)
+        self.assertEqual(report['total']['by_reason']['state_jump']['affected_episode_count'], 1)
 
     def test_invalid_reports_identify_line(self):
         for change in ({'index': True}, {'index': 2}, {'start_ns': -1}, {'end_ns': False},
@@ -136,7 +133,7 @@ class AnomalyStatsTests(unittest.TestCase):
 
     def test_interrupt_is_clean(self):
         with contextlib.redirect_stdout(StringIO()), contextlib.redirect_stderr(StringIO()), patch(
-                'scripts.check.anomaly_stats.summarize_dataset', side_effect=KeyboardInterrupt):
+                'loom_data.check.anomaly_stats.summarize_dataset', side_effect=KeyboardInterrupt):
             with self.assertRaises(SystemExit) as raised:
                 main([str(self.root)])
         self.assertEqual(raised.exception.code, 130)

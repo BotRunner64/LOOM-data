@@ -9,13 +9,14 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert import abc130k as script
-from scripts.convert.export_common import VideoWriter, write_state
-from scripts.robot.kinematics import fk_poses
-from scripts.robot.urdf_model import parse_urdf
+from support import MODELS, assert_conversion_fails, episode_errors
+from loom_data.sources import abc130k as script
+from loom_data.contract import write_state
+from loom_data.robot.kinematics import fk_poses
+from loom_data.robot.urdf_model import parse_urdf
 
 
-MODEL = script.ROOT / 'assets/robot_models/yam'
+MODEL = MODELS / 'yam'
 
 
 class ExportTests(unittest.TestCase):
@@ -126,10 +127,9 @@ class ExportTests(unittest.TestCase):
             source.mkdir(parents=True)
             (source / 'episode.mcap').touch()
             with patch.object(script, 'YamFK'), patch.object(script, 'convert_episode', side_effect=ValueError('bad data')):
-                with self.assertRaisesRegex(ValueError, 'bad data'):
-                    script.convert(root / 'raw', root / 'export', MODEL)
+                assert_conversion_fails(self, 'bad data', 'abc130k', root / 'raw', root / 'export', model_dir=MODEL)
             self.assertFalse((root / 'export').exists())
-            self.assertEqual(sorted(p.name for p in root.iterdir()), ['raw'])
+            self.assertIn('bad data', episode_errors(root / 'export'))
 
 
 if __name__ == '__main__':

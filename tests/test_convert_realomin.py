@@ -11,10 +11,11 @@ import av
 import numpy as np
 import pyarrow.parquet as pq
 
-from scripts.convert import realomin as script
-from scripts.convert.export_common import tool_transform
-from scripts.convert.export_validation import validate_episode
-from scripts.robot.realomin_mount import mounting_geometry
+from support import assert_conversion_fails, convert
+from loom_data.sources import realomin as script
+from loom_data.geometry import tool_transform
+from loom_data.contract import validate_episode
+from loom_data.robot.realomin_mount import mounting_geometry
 
 
 def geometry_urdfs(root):
@@ -72,8 +73,8 @@ class RealOminTests(unittest.TestCase):
                                                  - geometry['eef_offset']), .01, places=10)
 
     def test_nominal_mount_is_used_by_direct_serial_parallel_and_cli_exports(self):
-        from scripts.convert import parallel
-        from scripts.convert.parallel_adapters import make_config
+        from loom_data.convert import job as parallel
+        from loom_data.convert.config import make_config
         import subprocess
         import sys
         records = []
@@ -95,7 +96,7 @@ class RealOminTests(unittest.TestCase):
             with patch.object(script, 'messages', side_effect=lambda path, video=False: iter(
                     row for row in records if bool(script.CAMERA.fullmatch(row[0])) == video)):
                 direct = script.convert_episode({'path': source, 'instruction': 'clean bowl'}, root / 'direct')
-                script.convert(root / 'raw', root / 'serial')
+                convert('realomin', root / 'raw', root / 'serial')
                 config = make_config('realomin', root / 'raw')
                 parallel.prepare(config, root / 'parallel')
                 self.assertEqual(parallel.worker(root / 'parallel', 0, 1), 0)
@@ -117,9 +118,9 @@ class RealOminTests(unittest.TestCase):
             bad = root / 'bad/clean_bowl/1.mcap'
             bad.parent.mkdir(parents=True)
             bad.write_bytes(b'bad MCAP')
-            result = subprocess.run([sys.executable, '-m', 'scripts.convert.realomin',
+            result = subprocess.run([sys.executable, '-m', 'loom_data', 'convert', 'run', '--dataset', 'realomin',
                                      '--input-dir', str(root / 'bad'), '--output-dir', str(root / 'cli')],
-                                    cwd=script.ROOT, capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue((root / 'cli/episodes.jsonl').exists())
 
@@ -199,15 +200,13 @@ class RealOminTests(unittest.TestCase):
             source.parent.mkdir(parents=True)
             source.touch()
             with patch.object(script, 'convert_episode', side_effect=ValueError('bad sample')):
-                with self.assertRaisesRegex(RuntimeError, 'Conversion failed'):
-                    script.convert(root/'raw', root/'out', eef_offset=[0., 0., 0.])
+                assert_conversion_fails(self, 'Conversion failed', 'realomin', root/'raw', root/'out', eef_offset=[0., 0., 0.])
             self.assertIn('bad sample', next((root/'out.work/errors').glob('*.err')).read_text())
             self.assertFalse((root/'out').exists())
-            self.assertFalse(list(root.glob('.out-*')))
 
     def test_parallel_adapter_keeps_calibration_and_resumes_native_mcap(self):
-        from scripts.convert import parallel
-        from scripts.convert.parallel_adapters import make_config
+        from loom_data.convert import job as parallel
+        from loom_data.convert.config import make_config
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root/'raw/clean_bowl/1/1.mcap'

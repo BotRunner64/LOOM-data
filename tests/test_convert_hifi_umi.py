@@ -11,7 +11,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert import hifi_umi as script
+from support import assert_conversion_fails, convert
+from loom_data.sources import hifi_umi as script
 
 
 def make_source(root, frames=4):
@@ -134,7 +135,7 @@ class HifiUmiTests(unittest.TestCase):
             root = Path(directory)
             for chunk, part in ((0, 0), (0, 1)):
                 make_shard(root / 'raw', chunk, part)
-            script.convert(root / 'raw', root / 'out', left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            convert('hifi_umi', root / 'raw', root / 'out', left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             records = [json.loads(line) for line in (root / 'out/episodes.jsonl').read_text().splitlines()]
             self.assertEqual([r['episode_id'] for r in records], [
                 'chunk_0000_part_0000_episode_000007', 'chunk_0000_part_0000_episode_000008',
@@ -166,17 +167,15 @@ class HifiUmiTests(unittest.TestCase):
                     reader.convert_episode(index, root / str(index), 0., script.DEFAULT_GRIPPER_OPEN_RAD, eef_offsets={'left': [0., 0., 0.], 'right': [0., 0., 0.]})
                 self.assertEqual(read.call_count, 1)
                 self.assertEqual(read.call_args.kwargs['columns'], list(script.COLUMNS))
-            script.convert(root / 'raw', root / 'out', limit=3, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            convert('hifi_umi', root / 'raw', root / 'out', limit=3, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertEqual(len((root / 'out/episodes.jsonl').read_text().splitlines()), 3)
 
     def test_short_shard_video_does_not_publish(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             make_shard(root / 'raw', video_frames=7)
-            with self.assertRaisesRegex(ValueError, 'expected 4 frames, decoded 3'):
-                script.convert(root / 'raw', root / 'out', left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            assert_conversion_fails(self, 'expected 4 frames, decoded 3', 'hifi_umi', root / 'raw', root / 'out', left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
-            self.assertFalse(list(root.glob('.out-*')))
 
     def test_shard_metadata_rejects_duplicate_indices_and_bad_video_range(self):
         for bad_range in (False, True):
@@ -195,7 +194,7 @@ class HifiUmiTests(unittest.TestCase):
 
     def test_rotation_is_repacked_not_transposed_and_preserves_body_delta(self):
         # A non-axis-aligned rotation catches mistakes hidden by identity poses.
-        from scripts.robot.kinematics import rpy_matrix
+        from loom_data.robot.kinematics import rpy_matrix
         rotation = rpy_matrix([.2, -.4, .7])
         source = np.r_[1, 2, 3, rotation[:2].ravel()]
         pose = script.poses_from_rows([source], eef_offset=[0., 0., 0.])[0]
@@ -221,7 +220,7 @@ class HifiUmiTests(unittest.TestCase):
             root = Path(directory)
             episode = make_source(root / 'raw')
             output = root / 'out'
-            script.convert(root / 'raw', output, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            convert('hifi_umi', root / 'raw', output, left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             records = [json.loads(line) for line in (output / 'episodes.jsonl').read_text().splitlines()]
             self.assertEqual(len(records), 1)
             record = records[0]
@@ -251,8 +250,9 @@ class HifiUmiTests(unittest.TestCase):
                 table = pq.read_table(video.with_suffix('.parquet'))
                 self.assertEqual(table['frame_index'].to_pylist(), [0, 1, 2, 3])
                 self.assertEqual(table['timestamp_ns'].to_pylist(), times)
-            with self.assertRaisesRegex(ValueError, 'already exists'):
-                script.convert(root / 'raw', output, gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            # A finished output only accepts the configuration that produced it.
+            with self.assertRaisesRegex(ValueError, 'Incompatible conversion config'):
+                convert('hifi_umi', root / 'raw', output, gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
 
     def test_bad_inputs_fail_without_publishing(self):
         mutations = {
@@ -276,11 +276,9 @@ class HifiUmiTests(unittest.TestCase):
                                                pa.array(values, type=table.schema.field(column).type))
                     pq.write_table(changed, episode / 'data.parquet')
                     with patch.object(script, 'copy_h264_video') as video:
-                        with self.assertRaises(ValueError):
-                            script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+                        assert_conversion_fails(self, '', 'hifi_umi', root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
                         video.assert_not_called()
                     self.assertFalse((root / 'out').exists())
-                    self.assertFalse(list(root.glob('.out-*')))
 
     def test_video_frame_mismatch_and_missing_camera_roll_back(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -290,23 +288,19 @@ class HifiUmiTests(unittest.TestCase):
             first = episode / 'videos' / f'{next(iter(script.CAMERAS))}.mp4'
             original = first.read_bytes()
             first.write_bytes((root / 'short/episodes/episode_000007/videos' / first.name).read_bytes())
-            with self.assertRaisesRegex(ValueError, 'expected 4 frames, decoded 3'):
-                script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            assert_conversion_fails(self, 'expected 4 frames, decoded 3', 'hifi_umi', root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
             first.write_bytes(original)
             (episode / 'videos' / f'{list(script.CAMERAS)[-1]}.mp4').unlink()
-            with self.assertRaises(FileNotFoundError):
-                script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            assert_conversion_fails(self, '', 'hifi_umi', root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
-            self.assertFalse(list(root.glob('.out-*')))
 
     def test_missing_episode_metadata_is_not_silently_skipped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             make_source(root / 'raw')
             (root / 'raw/episodes/episode_000008').mkdir()
-            with self.assertRaises(FileNotFoundError):
-                script.convert(root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
+            assert_conversion_fails(self, '', 'hifi_umi', root / 'raw', root / 'out', gripper_open_rad=1., left_eef_offset=[0., 0., 0.], right_eef_offset=[0., 0., 0.])
             self.assertFalse((root / 'out').exists())
 
     def test_source_layout_and_time_validation(self):

@@ -11,11 +11,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.convert import molmoact2 as script
-from scripts.robot.kinematics import fk_poses
-from scripts.robot.urdf_model import parse_urdf
+from support import MODELS, assert_conversion_fails, convert
+from loom_data.sources import molmoact2 as script
+from loom_data.robot.kinematics import fk_poses
+from loom_data.robot.urdf_model import parse_urdf
 
-MODEL = script.ROOT / 'assets/robot_models/yam'
+MODEL = MODELS / 'yam'
 
 
 def make_source(root, frames=4):
@@ -127,7 +128,7 @@ class MolmoAct2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = make_full_source(root / 'raw')
-            script.convert(source, root / 'out', limit=2)
+            convert('molmoact2', source, root / 'out', limit=2)
             records = [json.loads(line) for line in (root / 'out/episodes.jsonl').read_text().splitlines()]
             self.assertEqual([r['episode_id'] for r in records], ['episode_000007', 'episode_000008'])
             self.assertEqual(records[0]['instructions'][0]['text'], '整理杯子')
@@ -166,17 +167,15 @@ class MolmoAct2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = make_full_source(root / 'raw', video_frames=11)
-            with self.assertRaisesRegex(ValueError, 'expected 4 frames, decoded 3'):
-                script.convert(source, root / 'out')
+            assert_conversion_fails(self, 'expected 4 frames, decoded 3', 'molmoact2', source, root / 'out')
             self.assertFalse((root / 'out').exists())
-            self.assertFalse(list(root.glob('.out-*')))
 
     @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
     def test_full_export_schema_state_time_annotations_and_video(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             episode = make_source(root / 'raw')
-            script.convert(root / 'raw', root / 'out')
+            convert('molmoact2', root / 'raw', root / 'out')
             records = [json.loads(line) for line in (root / 'out/episodes.jsonl').read_text().splitlines()]
             self.assertEqual(len(records), 1)
             record = records[0]
@@ -212,8 +211,9 @@ class MolmoAct2Tests(unittest.TestCase):
                     self.assertEqual(len(reader.streams.audio), 0)
                     for i, frame in enumerate(reader.decode(video=0)):
                         self.assertAlmostEqual(frame.to_ndarray(format='rgb24').mean(), i * 60, delta=3)
-            with self.assertRaisesRegex(ValueError, 'already exists'):
-                script.convert(root / 'raw', root / 'out')
+            # A finished output only accepts the configuration that produced it.
+            with self.assertRaisesRegex(ValueError, 'Incompatible conversion config'):
+                convert('molmoact2', root / 'raw', root / 'out', limit=1)
 
     def test_annotation_fallback_and_duplicate_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -252,11 +252,9 @@ class MolmoAct2Tests(unittest.TestCase):
                 rows[key] = value
                 pq.write_table(pa.table(rows), episode / 'data.parquet')
                 with patch.object(script, 'YamFK'), patch.object(script, 'copy_h264_video') as video:
-                    with self.assertRaises(ValueError):
-                        script.convert(root / 'raw', root / 'out')
+                    assert_conversion_fails(self, '', 'molmoact2', root / 'raw', root / 'out')
                     video.assert_not_called()
                 self.assertFalse((root / 'out').exists())
-                self.assertFalse(list(root.glob('.out-*')))
 
     @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
     def test_failed_video_or_missing_episode_does_not_publish(self):
@@ -266,10 +264,8 @@ class MolmoAct2Tests(unittest.TestCase):
                 make_source(root / 'raw', frames=4 if missing_episode else 3)
                 if missing_episode:
                     (root / 'raw/episodes/episode_000008').mkdir()
-                with self.assertRaises((ValueError, FileNotFoundError)):
-                    script.convert(root / 'raw', root / 'out')
+                assert_conversion_fails(self, '', 'molmoact2', root / 'raw', root / 'out')
                 self.assertFalse((root / 'out').exists())
-                self.assertFalse(list(root.glob('.out-*')))
 
     def test_wrong_layout_and_invalid_limit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -282,8 +278,7 @@ class MolmoAct2Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'layout'):
                 script.validate_source(info)
             for limit in (0, -1, True):
-                with self.assertRaisesRegex(ValueError, 'limit'):
-                    script.convert(root / 'raw', root / 'out', limit=limit)
+                assert_conversion_fails(self, 'Limits must be positive', 'molmoact2', root / 'raw', root / 'out', limit=limit)
 
 
 if __name__ == '__main__':

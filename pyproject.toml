@@ -1,7 +1,7 @@
 [project]
-name = "robot-data-hub"
+name = "loom-data"
 version = "0.1.0"
-description = "Robot dataset selection and download tools"
+description = "Convert robot datasets to one export contract, then check and view them"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,19 +12,23 @@ dependencies = [
     "h5py>=3.10",
     "huggingface-hub>=1.0,<2.0",
     "httpx[socks]>=0.28.1,<1.0",
-    "modelscope>=1.40.1,<2.0",
     "pyarrow>=15",
     "tqdm>=4.66",
 ]
 
+[project.scripts]
+loom-data = "loom_data.cli:run"
+
 [project.optional-dependencies]
-models = ["numpy>=1.24"]
-model-preview = ["numpy>=1.24", "mujoco>=3.3,<4"]
+model-preview = ["mujoco>=3.3,<4"]
 viewer = ["pillow>=10"]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = []
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+loom_data = ["viewer/*.html", "viewer/*.js", "viewer/vendor/*"]

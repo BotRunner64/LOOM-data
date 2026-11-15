@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.check.dataset_stats import (
+from loom_data.check.dataset_stats import (
     discover_datasets, human_duration, main, summarize_dataset,
 )
 
@@ -144,7 +144,7 @@ class DatasetStatsTests(unittest.TestCase):
     def test_cli_interrupt_exits_cleanly_without_report(self):
         output, progress = StringIO(), StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(progress), patch(
-                'scripts.check.dataset_stats.summarize_dataset', side_effect=KeyboardInterrupt):
+                'loom_data.check.dataset_stats.summarize_dataset', side_effect=KeyboardInterrupt):
             with self.assertRaises(SystemExit) as raised:
                 main([str(self.root)])
         self.assertEqual(raised.exception.code, 130)

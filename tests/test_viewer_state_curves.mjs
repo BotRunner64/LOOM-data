@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {test} from 'node:test';
 
-const source = await readFile(new URL('../scripts/viewer/state_curves.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../src/loom_data/viewer/state_curves.js', import.meta.url), 'utf8');
 const {buildCurveTraces} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 
 test('curve traces contain only the exported EEF and gripper streams', () => {

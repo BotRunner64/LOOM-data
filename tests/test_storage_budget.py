@@ -1,17 +1,16 @@
 """Planning-time estimates, reproducible subsets, and unchanged worker execution."""
 import copy
-import importlib
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.convert import parallel
-from scripts.convert.parallel_adapters import make_config
-from scripts.convert.storage_budget import sample_tasks, storage_bytes
+from loom_data import sources
+from loom_data.convert import job as parallel
+from loom_data.convert.config import make_config
+from loom_data.convert.budget import sample_tasks, storage_bytes
 from test_convert_hifi_umi import make_source, make_shard
-from test_parallel_conversion import add_hifi_episode, manifest
+from test_convert_job import add_hifi_episode, manifest
 
 
 def task(ids, path, size):
@@ -116,7 +115,7 @@ class StorageBudgetPlanTests(unittest.TestCase):
         self.assertFalse((serial.work / 'storage_budget.json').exists())
         self.assertFalse((serial.work / 'storage_budget.lock').exists())
         parallel.prepare(config, serial_output)
-        with patch('scripts.convert.parallel_adapters.discover', side_effect=AssertionError('must reuse plan')):
+        with patch('loom_data.convert.config.discover', side_effect=AssertionError('must reuse plan')):
             parallel.prepare(config, serial_output)
         before = {p: p.stat().st_mtime_ns for p in serial_output.rglob('*') if p.is_file()}
         parallel.run(config, serial_output, workers=2)
@@ -151,15 +150,14 @@ class StorageBudgetPlanTests(unittest.TestCase):
         parallel.finalize(store.output)
         self.assertEqual([r['episode_id'] for r in manifest(store.output)], store.ids)
 
-    def test_all_source_clis_forward_budget_options(self):
-        for dataset in parallel.DATASETS:
-            with self.subTest(dataset=dataset), patch.object(parallel, 'run_native') as run:
-                module = importlib.import_module(f'scripts.convert.{dataset}')
-                argv = [dataset, '--input-dir', str(self.source), '--output-dir', str(self.root / dataset),
-                        '--storage-budget', '1.5GiB', '--sample-seed', '42', '--storage-estimate-ratio', '2']
-                with patch.object(sys, 'argv', argv):
-                    module.main()
-                config, output = run.call_args.args
+    def test_budget_options_reach_every_source(self):
+        for dataset in sources.NAMES:
+            with self.subTest(dataset=dataset), patch.object(parallel, 'run') as run:
+                status = parallel.main(['run', '--dataset', dataset, '--input-dir', str(self.source),
+                                        '--output-dir', str(self.root / dataset), '--storage-budget', '1.5GiB',
+                                        '--sample-seed', '42', '--storage-estimate-ratio', '2'])
+                self.assertEqual(status, 0)
+                config, output, _ = run.call_args.args
                 self.assertEqual(config['dataset'], dataset)
                 self.assertEqual(config['storage_budget'], 1610612736)
                 self.assertEqual(config['sample_seed'], 42)

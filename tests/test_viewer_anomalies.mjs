@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {test} from 'node:test';
 
-const source = await readFile(new URL('../scripts/viewer/anomalies.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../src/loom_data/viewer/anomalies.js', import.meta.url), 'utf8');
 const {containsTime, filterRecords} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 
 test('intervals exclude their end; points include exactly their timestamp', () => {
