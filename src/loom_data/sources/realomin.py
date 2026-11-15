@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """Convert dual-gripper RealOmin MCAPs, preserving each stream's native clock."""
 from __future__ import annotations
 
-import argparse
+from functools import cached_property
 from contextlib import ExitStack
 import hashlib
 import os
@@ -12,11 +11,12 @@ import re
 
 from loom_data.video import VideoWriter
 from loom_data.sources.common import normalized_gripper
-from loom_data.geometry import pose_matrix, tool_transform
-from loom_data.contract import encode_pose as rotation9d, write_state, write_video_index
+from loom_data.geometry import eef_offset, pose_matrix, tool_transform
+from loom_data.contract import encode_pose, write_state, write_video_index
 from loom_data.sources.policy import SourceDataError, source_value
 
-from loom_data.paths import ROOT
+from loom_data.sources.base import Source, task_limit
+
 REPO_ID = 'genrobot2025/10Kh-RealOmin-OpenData'
 STATES = {f'/robot{i}/{topic}': f'{side}_{kind}'
           for i, side in enumerate(('left', 'right'))
@@ -30,7 +30,6 @@ DEFAULT_EEF_OFFSET = (-0.068277831741, 0.000372712242, -0.098051703299)
 DEFAULT_TOOL_RPY = (0., -0.261799387799149, 0.)
 DEFAULT_GRIPPER_OPEN = 0.103
 DEFAULT_GRIPPER_CLOSED = 0.
-DEFAULT_INPUT = ROOT / 'dataset/raw/genrobot-realomin-10kh'
 
 
 def camera_id(topic):
@@ -133,7 +132,7 @@ def convert_episode(source, destination, transform=None,
             if decoded.frame_id != 'world' or not decoded.HasField('pose'):
                 raise SourceDataError('invalid_eef_pose', f'{topic}: expected a pose in the fixed world frame')
             p, q = decoded.pose.position, decoded.pose.orientation
-            value = rotation9d(source_value('invalid_eef_pose', pose_matrix, (p.x, p.y, p.z), (q.x, q.y, q.z, q.w)) @ transform)
+            value = encode_pose(source_value('invalid_eef_pose', pose_matrix, (p.x, p.y, p.z), (q.x, q.y, q.z, q.w)) @ transform)
         else:
             value = source_value('invalid_gripper', normalized_gripper, decoded.value, gripper_closed, gripper_open)
         state[name][0].append(timestamp)
@@ -168,39 +167,57 @@ def convert_episode(source, destination, transform=None,
             'instructions': [{'start_ns': 0, 'end_ns': end-origin, 'text': source['instruction']}]}
 
 
-def convert(source, output, limit=None, eef_offset=DEFAULT_EEF_OFFSET, tool_rpy=DEFAULT_TOOL_RPY,
-            gripper_closed=DEFAULT_GRIPPER_CLOSED, gripper_open=DEFAULT_GRIPPER_OPEN, instruction=None):
-    from loom_data.convert.parallel import run_native
-    from loom_data.convert.parallel_adapters import make_config
-    config = make_config('realomin', source, limit=limit, eef_offset=eef_offset, tool_rpy=tool_rpy,
-                         gripper_closed=gripper_closed, gripper_open=gripper_open, instruction=instruction)
-    run_native(config, output)
+class RealOmin(Source):
+    name = 'realomin'
+    title = '10Kh-RealOmin-OpenData'
+    policy = 'drop'
+    OPTIONS = {
+        'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                           help='mounting origin in source raw EE axes, metres (default: nominal V3 rear flange)'),
+        'tool_rpy': dict(type=float, nargs=3, metavar=('R', 'P', 'Y'),
+                         help='contract tool axes in the source body, RPY radians'),
+        'gripper_open': dict(type=float, help='measured source value at full open'),
+        'gripper_closed': dict(type=float, help='measured source value at full close'),
+        'instruction': dict(help='task text for every episode, instead of the skill name in its path'),
+    }
+
+    @classmethod
+    def make_params(cls, options):
+        params = {'data_policy_version': 1,
+                  'eef_offset': eef_offset(options['eef_offset'] if options['eef_offset'] is not None
+                                           else DEFAULT_EEF_OFFSET).tolist(),
+                  'gripper_open': DEFAULT_GRIPPER_OPEN if options['gripper_open'] is None else options['gripper_open'],
+                  'gripper_closed': DEFAULT_GRIPPER_CLOSED if options['gripper_closed'] is None else options['gripper_closed'],
+                  'tool_rpy': list(options['tool_rpy'] if options['tool_rpy'] is not None else DEFAULT_TOOL_RPY),
+                  'instruction': options['instruction']}
+        normalized_gripper(0., params['gripper_closed'], params['gripper_open'])
+        if params['instruction'] is not None and (not isinstance(params['instruction'], str)
+                                                  or not params['instruction'].strip()):
+            raise ValueError('Instruction override must be nonempty')
+        tool_transform(params['eef_offset'], params['tool_rpy'])
+        return params
+
+    @classmethod
+    def discover(cls, config, progress):
+        source = Path(config['source'])
+        shared = [source / 'subset_manifest.json'] if (source / 'subset_manifest.json').exists() else []
+        tasks = []
+        with progress('Discovering native-pose episodes', unit='episode') as bar:
+            for episode_id, item in islice(iter_discover(source, config['params']['instruction']), task_limit(config)):
+                tasks.append({'source': str(item['path']), 'instruction': item['instruction'],
+                              'episode_ids': [episode_id], 'inputs': [str(item['path'])]})
+                if 'drop' in item:
+                    tasks[-1]['drop'] = item['drop']
+                bar.update()
+        return tasks, shared
+
+    @cached_property
+    def transform(self):
+        return tool_transform(self.params['eef_offset'], self.params['tool_rpy'])
+
+    def episode(self, task, destination):
+        return convert_episode({'path': Path(task['source']), 'instruction': task['instruction']}, destination,
+                               self.transform, self.params['gripper_closed'], self.params['gripper_open'])
 
 
-def main():
-    from loom_data.convert.storage_budget import add_budget_arguments, run_budgeted_cli
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-dir', type=Path, default=DEFAULT_INPUT if DEFAULT_INPUT.exists() else ROOT / 'dataset/raw/10Kh-RealOmin-OpenData')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/10Kh-RealOmin-OpenData')
-    parser.add_argument('--limit', type=int)
-    parser.add_argument('--eef-offset', nargs=3, type=float, default=DEFAULT_EEF_OFFSET,
-                        help='mounting origin in source raw EE axes, metres; default: nominal V3 rear flange from vendor models')
-    parser.add_argument('--tool-rpy', nargs=3, type=float, default=DEFAULT_TOOL_RPY, help='contract tool axes in source body, RPY radians')
-    parser.add_argument('--gripper-open', type=float, default=DEFAULT_GRIPPER_OPEN)
-    parser.add_argument('--gripper-closed', type=float, default=DEFAULT_GRIPPER_CLOSED)
-    parser.add_argument('--instruction', help='Override path-derived skill text for all selected episodes')
-    add_budget_arguments(parser)
-    args = parser.parse_args()
-    if args.limit is not None and args.limit < 1:
-        parser.error('--limit must be positive')
-    try:
-        if run_budgeted_cli(args, 'realomin'):
-            return
-        convert(args.input_dir, args.output_dir, args.limit, args.eef_offset, args.tool_rpy,
-                args.gripper_closed, args.gripper_open, args.instruction)
-    except (ValueError, OSError, KeyError, RuntimeError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()
+SOURCE = RealOmin

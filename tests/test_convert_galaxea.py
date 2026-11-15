@@ -10,8 +10,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from loom_data.convert.galaxea import (
-    ROOT, DEFAULT_EEF_OFFSETS, TOOL_AXES, GalaxeaKinematics, convert,
+import support
+from support import MODELS, assert_conversion_fails
+from loom_data.sources.galaxea import (
+    DEFAULT_EEF_OFFSETS, TOOL_AXES, GalaxeaKinematics,
     instruction_segments, is_stationary, openness, source_path, validate_source,
 )
 from loom_data.geometry import pose_matrix
@@ -122,13 +124,13 @@ class GalaxeaMappingTests(unittest.TestCase):
             self.assertAlmostEqual(np.linalg.det(axes), 1.)
 
 
-@unittest.skipUnless(all((ROOT / f'assets/robot_models/galaxea_{k}/robot.json').exists()
+@unittest.skipUnless(all((MODELS / f'galaxea_{k}/robot.json').exists()
                          for k in DEFAULT_EEF_OFFSETS), 'Galaxea model assets absent')
 class GalaxeaPoseTests(unittest.TestCase):
     def test_recorded_poses_match_distinct_model_frames(self):
         fixture = json.loads((Path(__file__).parent / 'fixtures/galaxea_pose_samples.json').read_text())
         for kind in DEFAULT_EEF_OFFSETS:
-            directory = ROOT / f'assets/robot_models/galaxea_{kind}'
+            directory = MODELS / f'galaxea_{kind}'
             model = parse_urdf(directory / 'robot.urdf')
             converter = GalaxeaKinematics(directory, kind)
             for sample in (s for s in fixture['samples'] if s['robot_type'] == kind):
@@ -154,7 +156,7 @@ class GalaxeaPoseTests(unittest.TestCase):
 
     def test_torso_motion_changes_reference_pose_and_mount_rotates_with_tool(self):
         for kind in DEFAULT_EEF_OFFSETS:
-            fk = GalaxeaKinematics(ROOT / f'assets/robot_models/galaxea_{kind}', kind)
+            fk = GalaxeaKinematics(MODELS / f'galaxea_{kind}', kind)
             raw = [[.2, .3, .4, 0, 0, 0, 1]]*2
             before = fk.poses([0, 0, 0, 0], raw)[0]
             moved = fk.poses([.2, -.1, .3, .1 if kind == 'r1pro' else 0], raw)[0]
@@ -163,10 +165,16 @@ class GalaxeaPoseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'quaternion'):
                 fk.poses([0]*4, bad)
         with self.assertRaisesRegex(ValueError, 'padding'):
-            GalaxeaKinematics(ROOT/'assets/robot_models/galaxea_r1lite', 'r1lite').poses([0, 0, 0, .1], raw)
+            GalaxeaKinematics(MODELS/'galaxea_r1lite', 'r1lite').poses([0, 0, 0, .1], raw)
 
 
-@unittest.skipUnless(all((ROOT / f'assets/robot_models/galaxea_{k}/robot.json').exists()
+def convert(source, output, **options):
+    """Convert and return the number of exported episodes."""
+    support.convert('galaxea', source, output, **options)
+    return len(support.manifest(output))
+
+
+@unittest.skipUnless(all((MODELS / f'galaxea_{k}/robot.json').exists()
                          for k in DEFAULT_EEF_OFFSETS), 'Galaxea model assets absent')
 class GalaxeaExportTests(unittest.TestCase):
     def setUp(self):
@@ -228,28 +236,27 @@ class GalaxeaExportTests(unittest.TestCase):
                 frames = list(reader.decode(video=0))
                 self.assertEqual(len(frames), 3)
                 self.assertLess(frames[0].to_ndarray().mean(), frames[-1].to_ndarray().mean())
-        with self.assertRaisesRegex(ValueError, 'already exists'):
-            convert(self.source, output)
+        # Rerunning a finished conversion changes nothing.
+        self.assertEqual(convert(self.source, output), 2)
 
-    def test_missing_camera_rolls_back_the_entire_export(self):
+    def test_missing_camera_is_not_published(self):
         next((self.source/'r1pro').glob('videos/*/*/*.mp4')).unlink()
         output = self.root/'export'
-        with self.assertRaises(OSError):
-            convert(self.source, output)
-        self.assertFalse(output.exists())
-        self.assertFalse(list(self.root.glob('.export-*')))
+        assert_conversion_fails(self, 'Error', 'galaxea', self.source, output)
 
-    def test_motion_is_skipped_and_limit_counts_only_accepted_episodes(self):
+    def test_motion_is_skipped_and_limit_counts_candidates(self):
         path = next((self.source/'r1lite').glob('data/*/*.parquet'))
         rows = pq.read_table(path).to_pydict()
         rows['action.chassis.velocities'][1][0] = .1
         pq.write_table(pa.table(rows), path)
         output = self.root/'export'
-        self.assertEqual(convert(self.source, output, limit_episodes=1), 1)
+        self.assertEqual(convert(self.source, output), 1)
         records = [json.loads(line) for line in (output/'episodes.jsonl').read_text().splitlines()]
         self.assertEqual(records[0]['episode_id'], 'r1pro_episode_000000')
         self.assertEqual({p.name for p in output.iterdir()}, {'episodes', 'episodes.jsonl'})
         self.assertFalse((output/'episodes/r1lite_episode_000000').exists())
+        # The limit selects candidates before conversion, so a skipped episode still uses it up.
+        self.assertEqual(convert(self.source, self.root/'limited', limit_episodes=1), 0)
 
     def test_invalid_commands_are_skipped_without_reason_files(self):
         for path in self.source.glob('*/data/*/*.parquet'):
@@ -285,8 +292,7 @@ class GalaxeaExportTests(unittest.TestCase):
                                       ('frame_index', [0,2,3], 'frame_index')]:
             rows = copy.deepcopy(original); rows[column] = bad
             pq.write_table(pa.table(rows), path)
-            with self.assertRaisesRegex(ValueError, message):
-                convert(self.source, self.root/'export')
+            assert_conversion_fails(self, message, 'galaxea', self.source, self.root/'export')
         video = next((self.source/'r1lite').glob('videos/*/*/*.mp4'))
         with self.assertRaisesRegex(ValueError, 'expected 4'):
             transcode_video(video, self.root/'mismatch.mp4', 4)

@@ -10,7 +10,8 @@ import h5py
 import numpy as np
 import pyarrow.parquet as pq
 
-from loom_data.convert import agibotworld_beta as script
+from support import assert_conversion_fails, convert
+from loom_data.sources import agibotworld_beta as script
 from loom_data.geometry import tool_transform
 from loom_data.contract import validate_episode
 
@@ -106,7 +107,7 @@ class BetaExportTests(unittest.TestCase):
     def test_real_media_schema_video_count_and_precision(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);make_source(root/'raw')
-            script.convert(root/'raw',root/'out')
+            convert('agibotworld_beta', root/'raw',root/'out')
             record=json.loads((root/'out/episodes.jsonl').read_text())
             destination=root/'out/episodes'/record['episode_id']
             validate_episode(destination,record)
@@ -133,14 +134,13 @@ class BetaExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);make_source(root/'raw')
             with patch.object(script,'transcode_video',side_effect=ValueError('frame mismatch')):
-                with self.assertRaisesRegex(RuntimeError,'Conversion failed'):script.convert(root/'raw',root/'out')
+                assert_conversion_fails(self, 'Conversion failed', 'agibotworld_beta', root/'raw',root/'out')
             self.assertIn('frame mismatch', (root/'out.work/errors/task_694_episode_123.err').read_text())
             self.assertFalse((root/'out').exists())
-            self.assertFalse(list(root.glob('.out-*')))
 
     def test_parallel_adapter_publishes_and_resumes(self):
-        from loom_data.convert import parallel
-        from loom_data.convert.parallel_adapters import make_config
+        from loom_data.convert import job as parallel
+        from loom_data.convert.config import make_config
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);make_source(root/'raw')
             config=make_config('agibotworld_beta',root/'raw')

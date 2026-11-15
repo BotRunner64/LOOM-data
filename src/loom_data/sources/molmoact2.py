@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
 """Convert a local MolmoAct2-BimanualYAM LeRobot v3 dataset or episode subset."""
 from __future__ import annotations
 
-import argparse
+from functools import cached_property
 import json
 from pathlib import Path
-import re
-import tempfile
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -15,10 +12,11 @@ from loom_data.video import copy_h264_video
 from loom_data.contract import seconds_to_ns, write_state, write_video_index
 from loom_data.sources.common import task_instructions
 from loom_data.robot.yam import YamFK
-from loom_data.convert.lerobot_v3 import LeRobotV3Reader
+from loom_data.sources.lerobot_v3 import LeRobotV3Reader, subset_tasks
 from loom_data.video import extract_video_segment
 
-from loom_data.paths import ROOT
+from loom_data.sources.base import Source, task_limit
+
 CAMERAS = {'observation.images.top': 'top',
            'observation.images.left': 'left_wrist',
            'observation.images.right': 'right_wrist'}
@@ -146,76 +144,53 @@ class DatasetReader(LeRobotV3Reader):
                                  row['videos'][key], target, len(times), self.fps))
 
 
-def convert(source, output, model_dir=ROOT / 'assets/robot_models/yam', *, limit=None):
-    if limit is not None and (type(limit) is not int or limit < 1):
-        raise ValueError('limit must be a positive integer')
-    if output.exists():
-        raise ValueError(f'Output already exists; choose a new directory: {output}')
-    if not (source / 'source').is_dir():
-        return convert_dataset(source, output, model_dir, limit)
-    meta = source / 'source/meta'
-    validate_source(json.loads((meta / 'info.json').read_text(encoding='utf-8')))
-    tasks, annotated = load_tasks(meta)
-    episodes = sorted(p for p in (source / 'episodes').iterdir() if p.is_dir())
-    if not episodes or any(not re.fullmatch(r'episode_\d+', p.name) for p in episodes):
-        raise ValueError(f'No episodes or invalid episode directory names under {source}')
-    episodes = episodes[:limit]
-    # Use each fixed arm base, without assuming the ABC dual-arm mounting is
-    # MolmoAct2's calibration. The contract permits independent fixed references.
-    fk = YamFK(model_dir, arm_local=True)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
-        staged = Path(temporary) / 'dataset'
-        staged.mkdir()
-        with (staged / 'episodes.jsonl').open('w', encoding='utf-8') as handle:
-            for i, episode in enumerate(episodes, 1):
-                print(f'[{i}/{len(episodes)}] {episode.name}', flush=True)
-                record = convert_episode(episode, staged / 'episodes' / episode.name,
-                                         tasks, annotated, fk)
-                handle.write(json.dumps(record, ensure_ascii=False) + '\n')
-        if output.exists():
-            raise ValueError(f'Output appeared during conversion: {output}')
-        staged.rename(output)
-    print(f'Exported {len(episodes)} episodes to {output}', flush=True)
+class MolmoAct2(Source):
+    name = 'molmoact2'
+    title = 'MolmoAct2-BimanualYAM'
+    model = 'yam'
+
+    @classmethod
+    def discover(cls, config, progress):
+        source, limit = Path(config['source']), task_limit(config)
+        if (source / 'source').is_dir():  # episode subset written by the downloader
+            meta = source / 'source/meta'
+            validate_source(json.loads((meta / 'info.json').read_text(encoding='utf-8')))
+            load_tasks(meta)
+            shared = [meta / name for name in ('info.json', 'tasks.parquet', 'tasks_annotated.parquet')]
+            return subset_tasks(source, CAMERAS, limit, progress), shared
+        reader = DatasetReader(source)
+        shared = [source / 'meta' / name for name in ('info.json', 'tasks.parquet', 'tasks_annotated.parquet')]
+        shared.extend(reader.metadata_files)
+        indices = sorted(reader.episodes)[:limit]
+        tasks = []
+        with progress('Discovering MolmoAct2 episodes', len(indices), unit='episode') as bar:
+            for index in indices:
+                row = reader.episodes[index]
+                inputs = {row['data_path'], *(video['path'] for video in row['videos'].values())}
+                tasks.append({'source': str(source), 'layout': 'lerobot_v3', 'index': index,
+                              'episode_ids': [f'episode_{index:06d}'], 'inputs': sorted(inputs)})
+                bar.update()
+        return tasks, shared
+
+    @cached_property
+    def fk(self):
+        # Use each fixed arm base, without assuming the ABC dual-arm mounting is
+        # MolmoAct2's calibration. The contract permits independent fixed references.
+        return YamFK(self.model_dir, arm_local=True)
+
+    @cached_property
+    def reader(self):
+        return DatasetReader(self.root)
+
+    @cached_property
+    def tasks(self):
+        return load_tasks(self.root / 'source/meta')
+
+    def episode(self, task, destination):
+        if task.get('layout') == 'lerobot_v3':
+            return self.reader.convert_episode(task['index'], destination, self.fk)
+        tasks, annotated = self.tasks
+        return convert_episode(Path(task['source']), destination, tasks, annotated, self.fk)
 
 
-def convert_dataset(source, output, model_dir, limit):
-    reader = DatasetReader(source)
-    indices = sorted(reader.episodes)[:limit]
-    fk = YamFK(model_dir, arm_local=True)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
-        staged = Path(temporary) / 'dataset'
-        staged.mkdir()
-        with (staged / 'episodes.jsonl').open('w', encoding='utf-8') as handle:
-            for number, index in enumerate(indices, 1):
-                episode_id = f'episode_{index:06d}'
-                print(f'[{number}/{len(indices)}] {episode_id}', flush=True)
-                record = reader.convert_episode(index, staged / 'episodes' / episode_id, fk)
-                handle.write(json.dumps(record, ensure_ascii=False) + '\n')
-        if output.exists():
-            raise ValueError(f'Output appeared during conversion: {output}')
-        staged.rename(output)
-    print(f'Exported {len(indices)} episodes to {output}', flush=True)
-
-
-def main():
-    from loom_data.convert.storage_budget import add_budget_arguments, run_budgeted_cli
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/MolmoAct2-BimanualYAM')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/MolmoAct2-BimanualYAM')
-    parser.add_argument('--model-dir', type=Path, default=ROOT / 'assets/robot_models/yam')
-    parser.add_argument('--limit', type=int, help='convert only the first N sorted episodes')
-    add_budget_arguments(parser)
-    args = parser.parse_args()
-    import av
-    try:
-        if run_budgeted_cli(args, 'molmoact2'):
-            return
-        convert(args.input_dir, args.output_dir, args.model_dir, limit=args.limit)
-    except (RuntimeError, ValueError, OSError, av.FFmpegError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()
+SOURCE = MolmoAct2

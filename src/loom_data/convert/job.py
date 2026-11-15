@@ -1,5 +1,14 @@
-#!/usr/bin/env python3
-"""Resumable CPU conversion: prepare, statically assigned workers, then publish."""
+"""The conversion job: prepare a plan, run statically assigned workers, then publish.
+
+Every conversion goes through this job, whether one local worker or a Slurm
+array. Episodes are committed one by one, so an interrupted job resumes where
+it stopped. State lives in a work directory beside the output:
+
+    plan.json          frozen config, tasks and input fingerprints
+    records/<id>.json  one committed or skipped episode
+    errors/<id>.err    last failure of an unfinished episode
+    dataset/           committed episodes, renamed to the output by finalize
+"""
 from __future__ import annotations
 
 import argparse
@@ -15,21 +24,18 @@ import sys
 import tempfile
 import traceback
 
-from loom_data.convert.storage_budget import add_budget_arguments, sample_tasks
-
+from loom_data import contract, paths, resumable, sources
+from loom_data.convert import config as configuration
+from loom_data.convert.budget import sample_tasks
 from loom_data.resumable import (
     StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, encoded, input_stamp,
     no_progress, progress, read_json, require_single_process, run_cli, run_workers, sync_directory,
     worker_diagnostics, worker_rank,
 )
-from loom_data import resumable
 
 
 def work_directory(output):
     return resumable.work_directory(output, '.work')
-
-
-DATASETS = ('abc130k', 'molmoact2', 'hifi_umi', 'galaxea', 'agibotworld2026', 'realomin', 'agibotworld_beta')
 
 
 def validate_plan(plan):
@@ -37,8 +43,7 @@ def validate_plan(plan):
         raise StateError('Unsupported or damaged plan')
     if plan.get('id') != digest({k: v for k, v in plan.items() if k != 'id'}):
         raise StateError('Plan checksum mismatch')
-    from loom_data.contract import VERSION as EXPORT_CONTRACT_VERSION
-    if plan.get('config', {}).get('params', {}).get('export_contract_version') != EXPORT_CONTRACT_VERSION:
+    if plan.get('config', {}).get('params', {}).get('export_contract_version') != contract.VERSION:
         raise StateError('Incompatible export contract: old TCP plans require a new output and re-export')
     if plan.get('config', {}).get('storage_budget') is not None and not isinstance(plan.get('storage_sampling'), dict):
         raise StateError('Incompatible storage budget plan; prepare a new output directory')
@@ -63,10 +68,11 @@ class Store:
         self.ids = [i for task in plan['tasks'] for i in task['episode_ids']]
         self.id_set = set(self.ids)
         self.dataset = self.work / 'dataset'
-        self.native_policy = (plan['config']['dataset'] in ('realomin', 'agibotworld_beta')
-                              and plan['config']['params'].get('data_policy_version') == 1)
-        if plan['config']['dataset'] in ('realomin', 'agibotworld_beta') and not self.native_policy:
-            raise StateError('Native source policy changed; use a new output directory')
+        policy = sources.get(plan['config']['dataset']).policy
+        self.skips = policy != 'strict'   # episodes may be left out with a recorded reason
+        self.drops = policy == 'drop'     # ... because their source data is bad
+        if self.drops and plan['config']['params'].get('data_policy_version') != 1:
+            raise StateError('Source data policy changed; use a new output directory')
 
     @classmethod
     def load(cls, output):
@@ -74,7 +80,6 @@ class Store:
         return cls(output, read_json(work_directory(output) / 'plan.json'))
 
     def state(self, episode_id, *, published=False):
-        from loom_data.contract import file_sizes, validate_record
         if episode_id not in self.id_set:
             raise StateError(f'Unknown episode: {episode_id}')
         path = self.work / 'records' / f'{episode_id}.json'
@@ -91,11 +96,11 @@ class Store:
             raise StateError(f'{episode_id}: recovery record belongs to a different plan')
         try:
             if record.get('outcome') == 'skipped':
-                if ((self.plan['config']['dataset'] != 'galaxea' and not self.native_policy)
+                if (not self.skips
                         or not isinstance(record.get('reason'), str) or not record['reason'].strip()
                         or directory.exists() or directory.is_symlink()):
                     raise ValueError('invalid skip record or unexpected episode directory')
-                if self.native_policy:
+                if self.drops:
                     reasons = record.get('reasons')
                     if (not isinstance(reasons, list) or not reasons or record['reason'] not in reasons
                             or any(not isinstance(r, str) or not r.strip() for r in reasons)
@@ -104,14 +109,14 @@ class Store:
                 return record
             if record.get('outcome') != 'exported':
                 raise ValueError('invalid record outcome')
-            validate_record(record.get('manifest'), episode_id)
+            contract.validate_record(record.get('manifest'), episode_id)
             validate_conversion(record.get('conversion', {}))
             if (not isinstance(record.get('files'), dict) or not record['files']
                     or any(type(n) is not int or n <= 0 for n in record['files'].values())):
                 raise ValueError('invalid recorded file sizes')
             if not directory.exists() and not directory.is_symlink():
                 return None
-            if file_sizes(directory, record['manifest']) != record['files']:
+            if contract.file_sizes(directory, record['manifest']) != record['files']:
                 raise ValueError('committed files changed')
         except (ValueError, OSError) as exc:
             raise StateError(f'{episode_id}: damaged recovery state: {exc}') from exc
@@ -193,7 +198,6 @@ class Store:
         return True
 
     def commit(self, episode_id, directory, manifest):
-        from loom_data.contract import validate_episode
         if self.state(episode_id) is not None:
             raise StateError(f'{episode_id}: already committed')
         if manifest.get('episode_id') != episode_id or directory.name != episode_id:
@@ -201,7 +205,7 @@ class Store:
         manifest = dict(manifest)
         conversion = manifest.pop('_conversion', {})
         validate_conversion(conversion)
-        sizes = validate_episode(directory, manifest)
+        sizes = contract.validate_episode(directory, manifest)
         # Flush data before the recovery record and directory commit become durable.
         for name in sizes:
             with (directory / name).open('rb') as handle:
@@ -222,7 +226,7 @@ class Store:
         print(f'Committed {episode_id}', flush=True)
 
     def skip(self, episode_id, reason, *, detail='', reasons=None):
-        if self.plan['config']['dataset'] != 'galaxea' and not self.native_policy:
+        if not self.skips:
             raise StateError('This dataset has no legitimate skip policy')
         if self.state(episode_id) is not None:
             raise StateError(f'{episode_id}: already completed')
@@ -239,7 +243,7 @@ class Store:
         print(f'Skipped {episode_id}: {reason}', flush=True)
 
     def write_summary(self):
-        if self.native_policy:
+        if self.drops:
             atomic_json(self.work / 'conversion_summary.json', self.statistics)
             s = self.statistics
             print(f"Conversion: {s['exported']} exported ({s['repaired']} repaired), "
@@ -263,7 +267,6 @@ def validate_conversion(value):
 
 def prepare(config, output):
     require_single_process()
-    from loom_data.convert.parallel_adapters import discover
     output = Path(output).resolve()
     work = work_directory(output)
     source = Path(config['source'])
@@ -281,7 +284,7 @@ def prepare(config, output):
             raise StateError('Output already exists without a matching resume plan')
         if work.exists() and any(p.name not in ('plan.json', 'logs') and not p.name.endswith('.tmp') for p in work.iterdir()):
             raise StateError('Work directory has data but no plan')
-        tasks, shared = discover(config, progress)
+        tasks, shared = configuration.discover(config, progress)
         stamp_count = len(shared) + sum(len(task['inputs']) for task in tasks)
         shared_inputs = []
         with progress('Recording input metadata', stamp_count, unit='file') as bar:
@@ -349,15 +352,14 @@ def worker(output, worker_id, worker_count, *, report=None):
     if worker_count < 1 or not 0 <= worker_id < worker_count:
         raise ValueError('Require worker_count > 0 and 0 <= worker_id < worker_count')
     configure_worker()
-    from loom_data.convert.parallel_adapters import Adapter
     report('Loading plan')
     store = Store.load(output)
     report('Checking shared inputs and published output')
     check_inputs(store.plan['shared_inputs'])
     if store.published():
         return 0
-    report('Initializing adapter')
-    adapter = Adapter(store.plan['config'])
+    report('Initializing source')
+    source = sources.get(store.plan['config']['dataset'])(store.plan['config'])
     failures = 0
     for index, task in enumerate(store.plan['tasks']):
         if index % worker_count != worker_id:
@@ -376,7 +378,7 @@ def worker(output, worker_id, worker_count, *, report=None):
                 report(f'Episode {episode_id} failed: {type(exc).__name__}: {exc}')
                 store.failure(episode_id, task['source'], exc)
             try:
-                adapter.process(task, pending, Path(temporary), store, failed)
+                source.process(task, pending, Path(temporary), store, failed)
             except StateError:
                 raise
             except Exception as exc:
@@ -414,8 +416,8 @@ def finalize(output):
     print(f'Published {len(manifest)} episodes: {store.output}', flush=True)
 
 
-def run_native(config, output):
-    """The standalone native-pose CLIs share the resumable single-worker policy."""
+def run_serial(config, output):
+    """Prepare, convert in this process, and publish."""
     store = prepare(config, output)
     if worker(store.output, 0, 1):
         store.audit()
@@ -433,54 +435,36 @@ def run(config, output, workers=1):
     store = prepare(config, output)
     if store.published():
         return
-    command = [sys.executable, '-m', 'loom_data.convert.parallel', 'worker', '--output-dir', str(store.output)]
+    command = [sys.executable, '-m', 'loom_data', 'convert', 'worker', '--output-dir', str(store.output)]
     statuses = run_workers(command, workers)
     if any(statuses):
-        if store.native_policy:
+        if store.drops:
             store.audit()
             store.write_summary()
         raise RuntimeError(f'Workers failed ({statuses}); rerun the same command to resume')
     finalize(store.output)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='loom-data convert', description=__doc__.split('\n\n')[0])
     sub = parser.add_subparsers(dest='command', required=True)
     for name, help_text in (
-            ('prepare', 'create or validate the plan and clean interrupted attempts and diagnostics; one process'),
-            ('run', 'local only: prepare, launch local workers, finalize')):
+            ('run', 'local: prepare, run --workers processes, finalize'),
+            ('prepare', 'create or check the plan and clear interrupted attempts; one process')):
         launch = sub.add_parser(name, help=help_text)
-        launch.add_argument('--dataset', choices=DATASETS, required=True)
-        launch.add_argument('--input-dir', type=Path, required=True)
-        launch.add_argument('--output-dir', type=Path, required=True)
-        launch.add_argument('--model-dir', type=Path, help='model directory; Galaxea expects the parent of its two model packages')
+        launch.add_argument('--dataset', choices=sources.NAMES, required=True)
+        launch.add_argument('--input-dir', type=Path, help='source data (default: dataset/raw/<dataset name>)')
+        launch.add_argument('--output-dir', type=Path, help='export (default: dataset/export/<dataset name>)')
         if name == 'run':
-            launch.add_argument('--workers', type=int, default=1, help='local worker count (default 1)')
-        launch.add_argument('--limit', type=int, help='first N archives for AgiBot, first N episodes otherwise')
-        launch.add_argument('--limit-episodes', type=int, help='first N candidate episodes globally, including legitimate skips')
-        add_budget_arguments(launch)
-        launch.add_argument('--robot-type', choices=('r1lite', 'r1pro'), help='Galaxea embodiment filter')
-        launch.add_argument('--eef-offset', type=float, nargs=3, help='AgiBot/RealOmin mounting origin in source tool axes, metres')
-        for side in ('left', 'right'):
-            launch.add_argument(f'--{side}-eef-offset', type=float, nargs=3,
-                                help=f'HiFi-UMI {side} mounting origin in source virtual fingertip axes, metres; default: nominal [-0.12, 0, 0]')
-        launch.add_argument('--tool-rpy', type=float, nargs=3, help='RealOmin contract tool RPY in source axes')
-        launch.add_argument('--left-tool-rpy', type=float, nargs=3, help='Beta left contract tool RPY in source flange')
-        launch.add_argument('--right-tool-rpy', type=float, nargs=3, help='Beta right contract tool RPY in source flange')
-        launch.add_argument('--gripper-open', type=float, help='RealOmin/Beta measured source value at full open')
-        launch.add_argument('--gripper-closed', type=float, help='RealOmin/Beta measured source value at full close')
-        launch.add_argument('--instruction', help='RealOmin task text override')
-        for kind in ('r1lite', 'r1pro'):
-            launch.add_argument(f'--{kind}-eef-offset', type=float, nargs=3, help='Galaxea mounting origin in source tool axes, metres')
-        launch.add_argument('--gripper-open-rad', type=float, help='HiFi-UMI open angle')
-        launch.add_argument('--gripper-closed-rad', type=float, help='HiFi-UMI closed angle')
-    child = sub.add_parser('worker', help='process assigned tasks; caller launches with srun after prepare')
+            launch.add_argument('--workers', type=int, default=1, help='local worker processes (default 1)')
+        configuration.add_arguments(launch)
+    child = sub.add_parser('worker', help='convert the tasks assigned to one worker; launch with srun after prepare')
     child.add_argument('--output-dir', type=Path, required=True)
-    child.add_argument('--worker-id', type=int, default=None)
-    child.add_argument('--worker-count', type=int, default=None)
-    finish = sub.add_parser('finalize', help='verify all tasks and publish; one process after workers exit')
+    child.add_argument('--worker-id', type=int, help='default: $SLURM_PROCID')
+    child.add_argument('--worker-count', type=int, help='default: $SLURM_NTASKS')
+    finish = sub.add_parser('finalize', help='check every episode and publish; one process after all workers exit')
     finish.add_argument('--output-dir', type=Path, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         if args.command == 'worker':
             output = Path(args.output_dir).resolve()
@@ -494,15 +478,17 @@ def main():
             return 0
         if args.command == 'run' and args.workers < 1:
             raise ValueError('--workers must be positive')
-        for name in ('limit', 'limit_episodes'):
-            if getattr(args, name) is not None and getattr(args, name) < 1:
-                raise ValueError(f'--{name.replace("_", "-")} must be positive')
+        title = sources.get(args.dataset).title
+        if args.input_dir is None:
+            args.input_dir = paths.ROOT / 'dataset/raw' / title
+        if args.output_dir is None:
+            args.output_dir = paths.ROOT / 'dataset/export' / title
         configure_worker()
-        from loom_data.convert.parallel_adapters import configuration
+        config = configuration.from_arguments(args)
         if args.command == 'prepare':
-            prepare(configuration(args), args.output_dir)
+            prepare(config, args.output_dir)
         else:
-            run(configuration(args), args.output_dir, args.workers)
+            run(config, args.output_dir, args.workers)
     except KeyboardInterrupt:
         print('Interrupted; wait for all workers to exit, then rerun to resume.', file=sys.stderr)
         return 130

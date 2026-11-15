@@ -1,13 +1,9 @@
-#!/usr/bin/env python3
 """Convert ABC-130K MCAP episodes to the export contract using YAM joint FK."""
 from __future__ import annotations
 
-import argparse
+from functools import cached_property
 from contextlib import ExitStack
-import json
 from pathlib import Path
-import re
-import tempfile
 
 import numpy as np
 
@@ -15,7 +11,8 @@ from loom_data.video import VideoWriter
 from loom_data.contract import write_state, write_video_index
 from loom_data.robot.yam import YamFK
 
-from loom_data.paths import ROOT
+from loom_data.sources.base import Source, task_limit
+
 CAMERAS = {f'/{name}-camera': name.replace('-', '_') for name in
            ('top', 'top-left', 'top-right', 'left-wrist', 'right-wrist')}
 STATES = {f'/{side}-{kind}-state': f'{side}_{output}'
@@ -105,53 +102,29 @@ def convert_episode(source, destination, fk):
             'instructions': instructions(tasks[0], annotations, origin, end)}
 
 
-def convert(source, output, model_dir, limit=None):
-    if output.exists():
-        raise ValueError(f'Output already exists; choose a new directory: {output}')
-    files = sorted(source.rglob('episode.mcap'))
-    if limit is not None:
-        files = files[:limit]
-    if not files:
-        raise ValueError(f'No episode.mcap found under {source}')
-    names = [path.parent.name for path in files]
-    if len(names) != len(set(names)) or any(not re.fullmatch(r'[a-zA-Z0-9_-]+', n) for n in names):
-        raise ValueError('Episode directory names must be unique safe identifiers')
-    fk = YamFK(model_dir)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    # Publish the dataset only when all episodes succeed; no partial manifest or
-    # orphan episode is exposed at the requested output path on failure.
-    with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
-        staged = Path(temporary) / 'dataset'
-        staged.mkdir()
-        with (staged / 'episodes.jsonl').open('w', encoding='utf-8') as metadata:
-            for index, path in enumerate(files, 1):
-                print(f'[{index}/{len(files)}] {path.parent.name}', flush=True)
-                record = convert_episode(path.parent, staged / 'episodes' / path.parent.name, fk)
-                metadata.write(json.dumps(record, ensure_ascii=False) + '\n')
-        if output.exists():
-            raise ValueError(f'Output appeared during conversion: {output}')
-        staged.rename(output)
-    print(f'Exported {len(files)} episodes to {output}', flush=True)
+class Abc130k(Source):
+    name = 'abc130k'
+    title = 'ABC-130K'
+    model = 'yam'
+
+    @classmethod
+    def discover(cls, config, progress):
+        found = []
+        with progress('Scanning for episode.mcap files', unit='episode') as bar:
+            for path in Path(config['source']).rglob('episode.mcap'):
+                found.append(path)
+                bar.update()
+        tasks = [{'source': str(path.parent), 'episode_ids': [path.parent.name],
+                  'inputs': [str(path), str(path.parent / 'annotation.mcap')]}
+                 for path in sorted(found)[:task_limit(config)]]
+        return tasks, []
+
+    @cached_property
+    def fk(self):
+        return YamFK(self.model_dir)
+
+    def episode(self, task, destination):
+        return convert_episode(Path(task['source']), destination, self.fk)
 
 
-def main():
-    from loom_data.convert.storage_budget import add_budget_arguments, run_budgeted_cli
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/ABC-130K')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/export/ABC-130K')
-    parser.add_argument('--model-dir', type=Path, default=ROOT / 'assets/robot_models/yam')
-    parser.add_argument('--limit', type=int, help='convert only the first N sorted episodes')
-    add_budget_arguments(parser)
-    args = parser.parse_args()
-    if args.limit is not None and args.limit < 1:
-        parser.error('--limit must be positive')
-    try:
-        if run_budgeted_cli(args, 'abc130k'):
-            return
-        convert(args.input_dir, args.output_dir, args.model_dir, args.limit)
-    except (RuntimeError, ValueError, OSError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()
+SOURCE = Abc130k

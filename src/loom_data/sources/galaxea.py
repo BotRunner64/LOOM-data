@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
 """Convert extracted Galaxea R1 Lite / R1 Pro LeRobot v2.1 tasks to the export contract."""
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
-import re
-import tempfile
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -17,7 +13,8 @@ from loom_data.video import transcode_video
 from loom_data.robot.kinematics import fk_poses
 from loom_data.robot.urdf_model import Robot, parse_urdf
 
-from loom_data.paths import ROOT
+from loom_data.sources.base import Source, task_limit
+
 SIDES = ('left', 'right')
 CAMERAS = {f'observation.images.{name}_rgb': name for name in (
     'head', 'head_right', 'left_wrist', 'right_wrist',
@@ -275,94 +272,75 @@ def discover_tasks(source):
     return directories
 
 
-def convert(source, output, models_dir=ROOT / 'assets/robot_models', *,
-            robot_type=None, limit=None, limit_episodes=None, eef_offsets=None):
-    if output.exists():
-        raise ValueError(f'Output already exists: {output}')
-    for value in (limit, limit_episodes):
-        if value is not None and (type(value) is not int or value < 1):
-            raise ValueError('Limits must be positive integers')
-    if robot_type is not None and robot_type not in DEFAULT_EEF_OFFSETS:
-        raise ValueError(f'Unsupported robot_type filter: {robot_type}')
-    selected = []
-    for directory in discover_tasks(source):
-        info = json.loads((directory / 'meta/info.json').read_text())
-        if robot_type is None or info.get('robot_type') == robot_type:
-            selected.append((directory, info))
-    if limit is not None:
-        selected = selected[:limit]
-    if not selected:
-        raise ValueError('No tasks match the selected robot_type')
-    output.parent.mkdir(parents=True, exist_ok=True)
-    count, skipped, seen, models = 0, 0, set(), {}
-    with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
-        staged = Path(temporary) / 'dataset'
-        staged.mkdir()
-        (staged / 'episodes').mkdir()
-        with (staged / 'episodes.jsonl').open('w', encoding='utf-8') as manifest:
-            for directory, info in selected:
-                kind, cameras = validate_source(info)
-                if kind not in models:
-                    models[kind] = GalaxeaKinematics(models_dir / f'galaxea_{kind}', kind,
-                                                    (eef_offsets or {}).get(kind))
-                prefix = directory.name
-                if not re.fullmatch(r'[A-Za-z0-9_\-]+', prefix):
-                    raise ValueError(f'Unsafe task directory name: {prefix}')
-                metadata = read_jsonl(directory / 'meta/episodes.jsonl', 'episode_index')
-                tasks = {i: r['task'] for i, r in read_jsonl(directory / 'meta/tasks.jsonl', 'task_index').items()}
-                if len(metadata) != info['total_episodes']:
-                    raise ValueError(f'{directory}: episode metadata count mismatch')
-                chunks_size = info['chunks_size']
-                if type(chunks_size) is not int or chunks_size < 1:
-                    raise ValueError('Invalid chunks_size')
-                for index, episode in sorted(metadata.items()):
-                    episode_id = f'{prefix}_episode_{index:06d}'
-                    if episode_id in seen:
-                        raise ValueError(f'Duplicate episode ID: {episode_id}')
-                    seen.add(episode_id)
-                    record = convert_episode(directory, index, episode, tasks, models[kind], info,
-                                             staged / 'episodes' / episode_id)
-                    if record is None:
-                        skipped += 1
-                        print(f'Exported {count}; skipped {skipped}', flush=True)
-                        continue
-                    manifest.write(json.dumps(record, ensure_ascii=False) + '\n')
-                    count += 1
-                    print(f'Exported {count}; skipped {skipped}', flush=True)
-                    if limit_episodes is not None and count >= limit_episodes:
-                        break
-                if limit_episodes is not None and count >= limit_episodes:
+class Galaxea(Source):
+    name = 'galaxea'
+    title = 'Galaxea-Open-World-Dataset'
+    model = ''  # the parent of galaxea_r1lite/ and galaxea_r1pro/
+    policy = 'skip'
+    skip_reason = 'Galaxea chassis commands do not meet the stationary selection rule'
+    OPTIONS = {
+        'robot_type': dict(choices=tuple(DEFAULT_EEF_OFFSETS), help='only convert this embodiment'),
+        'r1lite_eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                                  help='mounting origin in native r1lite ee_pose, metres (default: model mounting joint)'),
+        'r1pro_eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                                 help='mounting origin in native r1pro ee_pose, metres (default: model mounting joint)'),
+    }
+
+    @classmethod
+    def make_params(cls, options):
+        robot_type = options['robot_type']
+        if robot_type is not None and robot_type not in DEFAULT_EEF_OFFSETS:
+            raise ValueError(f'Unsupported robot_type: {robot_type}')
+        return {'robot_type': robot_type,
+                'eef_offsets': {kind: list(options[f'{kind}_eef_offset'] if options[f'{kind}_eef_offset'] is not None
+                                           else DEFAULT_EEF_OFFSETS[kind]) for kind in ('r1lite', 'r1pro')}}
+
+    @classmethod
+    def discover(cls, config, progress):
+        limit, robot_type = task_limit(config), config['params']['robot_type']
+        tasks, shared = [], []
+        directories = discover_tasks(Path(config['source']))
+        with progress('Discovering tasks', len(directories), unit='task') as bar:
+            for directory in directories:
+                if limit is not None and len(tasks) >= limit:
                     break
-        if output.exists():
-            raise ValueError(f'Output appeared during conversion: {output}')
-        staged.rename(output)
-    print(f'Exported {count}; skipped {skipped}. Output: {output}', flush=True)
-    return count
+                bar.update()
+                info = json.loads((directory / 'meta/info.json').read_text(encoding='utf-8'))
+                if robot_type is not None and info.get('robot_type') != robot_type:
+                    continue
+                _, cameras = validate_source(info)
+                metadata = read_jsonl(directory / 'meta/episodes.jsonl', 'episode_index')
+                read_jsonl(directory / 'meta/tasks.jsonl', 'task_index')
+                chunks = info['chunks_size']
+                if len(metadata) != info['total_episodes'] or type(chunks) is not int or chunks < 1:
+                    raise ValueError(f'{directory}: invalid episode metadata/chunks_size')
+                shared.extend(directory / 'meta' / name for name in ('info.json', 'episodes.jsonl', 'tasks.jsonl'))
+                remaining = None if limit is None else limit - len(tasks)
+                for index in sorted(metadata)[:remaining]:
+                    paths = [source_path(directory, info['data_path'], index, chunks)]
+                    paths += [source_path(directory, info['video_path'], index, chunks, key) for key in cameras]
+                    tasks.append({'source': str(directory), 'index': index,
+                                  'episode_ids': [f'{directory.name}_episode_{index:06d}'],
+                                  'inputs': [str(p) for p in paths]})
+        return tasks, shared
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.directories, self.kinematics = {}, {}
+
+    def episode(self, task, destination):
+        directory, index = Path(task['source']), task['index']
+        if directory not in self.directories:
+            self.directories[directory] = (
+                json.loads((directory / 'meta/info.json').read_text(encoding='utf-8')),
+                read_jsonl(directory / 'meta/episodes.jsonl', 'episode_index'),
+                {i: r['task'] for i, r in read_jsonl(directory / 'meta/tasks.jsonl', 'task_index').items()})
+        info, metadata, tasks = self.directories[directory]
+        kind, _ = validate_source(info)
+        if kind not in self.kinematics:
+            self.kinematics[kind] = GalaxeaKinematics(self.model_dir / f'galaxea_{kind}', kind,
+                                                      self.params['eef_offsets'][kind])
+        return convert_episode(directory, index, metadata[index], tasks, self.kinematics[kind], info, destination)
 
 
-def main():
-    from loom_data.convert.storage_budget import add_budget_arguments, run_budgeted_cli
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/Galaxea-Open-World-Dataset')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/Galaxea-Open-World-Dataset')
-    parser.add_argument('--models-dir', type=Path, default=ROOT / 'assets/robot_models')
-    parser.add_argument('--robot-type', choices=tuple(DEFAULT_EEF_OFFSETS), help='only convert this embodiment')
-    parser.add_argument('--limit', type=int, help='first N sorted tasks after filtering')
-    parser.add_argument('--limit-episodes', type=int, help='first N accepted stationary episodes across selected tasks')
-    for kind in DEFAULT_EEF_OFFSETS:
-        parser.add_argument(f'--{kind}-eef-offset', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
-                            help=f'mounting origin in native {kind} ee_pose, metres; default follows model mounting joint')
-    add_budget_arguments(parser)
-    args = parser.parse_args()
-    try:
-        if run_budgeted_cli(args, 'galaxea'):
-            return
-        convert(args.input_dir, args.output_dir, args.models_dir,
-                robot_type=args.robot_type, limit=args.limit, limit_episodes=args.limit_episodes,
-                eef_offsets={kind: getattr(args, f'{kind}_eef_offset') for kind in DEFAULT_EEF_OFFSETS})
-    except (RuntimeError, ValueError, OSError, KeyError, TypeError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()
+SOURCE = Galaxea

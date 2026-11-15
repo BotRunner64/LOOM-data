@@ -22,15 +22,6 @@ def storage_bytes(value):
     raise ValueError('Storage budget must be positive whole bytes, e.g. 100GB or 100GiB')
 
 
-def add_budget_arguments(parser):
-    parser.add_argument('--storage-budget', type=storage_bytes,
-                        help='approximate output storage budget used to sample the plan; e.g. 100GB or 100GiB')
-    parser.add_argument('--sample-seed', type=int, default=0,
-                        help='episode sampling seed when --storage-budget is set (default 0)')
-    parser.add_argument('--storage-estimate-ratio', type=float, default=1.,
-                        help='estimated output/source byte ratio for storage sampling (default 1)')
-
-
 def sample_tasks(config, tasks):
     """Select episodes by seeded hash priority, preserving source task ordering.
 
@@ -73,19 +64,3 @@ def sample_tasks(config, tasks):
                'estimated_candidate_bytes': sum(size for _, _, size in candidates),
                'estimated_output_bytes': used}
     return sampled, summary
-
-
-def run_budgeted_cli(args, dataset):
-    """Route source CLIs with a budget through the common resumable store."""
-    if args.storage_budget is None:
-        if args.sample_seed != 0 or args.storage_estimate_ratio != 1.:
-            raise ValueError('--sample-seed and --storage-estimate-ratio require --storage-budget')
-        return False
-    from argparse import Namespace
-    from loom_data.convert.parallel import run_native
-    from loom_data.convert.parallel_adapters import configuration
-    values = dict(vars(args), dataset=dataset)
-    if 'models_dir' in values:
-        values['model_dir'] = values['models_dir']
-    run_native(configuration(Namespace(**values)), args.output_dir)
-    return True

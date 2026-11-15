@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """Convert AgiBot World 2026 LeRobot archives to the export contract."""
 from __future__ import annotations
 
-import argparse
+from functools import cached_property
 import io
 import json
 import math
@@ -10,7 +9,6 @@ from pathlib import Path
 import re
 import shutil
 import tarfile
-import tempfile
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -21,7 +19,8 @@ from loom_data.video import transcode_video
 from loom_data.robot.kinematics import fk_poses
 from loom_data.robot.urdf_model import Robot, parse_urdf
 
-from loom_data.paths import ROOT
+from loom_data.sources.base import Source
+
 STATE_FIELDS = ('state/left_effector/position', 'state/right_effector/position',
                 'state/end/arm_position', 'state/end/arm_orientation', 'state/waist/position',
                 'state/robot/position', 'state/robot/orientation')
@@ -334,58 +333,55 @@ def convert_archive(path, staged, fk, episode_limit=None, *, episode_ids=None,
     return [completed[index] for index in sorted(completed)]
 
 
-def convert(source, output, model_dir, limit=None, limit_episodes=None, eef_offset=DEFAULT_EEF_OFFSET):
-    if output.exists():
-        raise ValueError(f'Output already exists: {output}')
-    archives = sorted(source.rglob('*.tar.gz')) if source.is_dir() else [source]
-    if limit is not None:
-        archives = archives[:limit]
-    if not archives:
-        raise ValueError(f'No tar.gz archives found under {source}')
-    fk = G2FK(model_dir, eef_offset)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
-        staged = Path(temporary) / 'dataset'
-        staged.mkdir()
-        count = 0
-        with (staged / 'episodes.jsonl').open('w', encoding='utf-8') as manifest:
-            for number, archive in enumerate(archives, 1):
-                print(f'[{number}/{len(archives)}] {archive}', flush=True)
-                remaining = None if limit_episodes is None else limit_episodes - count
-                for record in convert_archive(archive, staged, fk, remaining):
-                    manifest.write(json.dumps(record, ensure_ascii=False) + '\n')
-                    count += 1
-                if limit_episodes is not None and count >= limit_episodes:
+class AgiBotWorld2026(Source):
+    name = 'agibotworld2026'
+    title = 'AgiBotWorld2026'
+    model = 'agibot_g2'
+    accepts_file = True  # one .tar.gz archive
+    OPTIONS = {
+        'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                           help='mounting origin in source tool axes, metres (default 0 0 0)'),
+    }
+
+    @classmethod
+    def make_params(cls, options):
+        offset = options['eef_offset']
+        return {'eef_offset': list(offset if offset is not None else DEFAULT_EEF_OFFSET)}
+
+    @classmethod
+    def discover(cls, config, progress):
+        # Here --limit counts archives; --limit-episodes counts episodes across them.
+        source = Path(config['source'])
+        if source.is_dir():
+            archives = []
+            with progress('Scanning for archives', unit='archive') as bar:
+                for path in source.rglob('*.tar.gz'):
+                    archives.append(path)
+                    bar.update()
+            paths = sorted(archives)
+        else:
+            paths = [source]
+        selected = paths if config['limit'] is None else paths[:config['limit']]
+        tasks, count = [], 0
+        with progress('Indexing archives', len(selected), unit='archive') as bar:
+            for path in selected:
+                _, _, entries = archive_index(path)
+                tasks.append({'source': str(path), 'episode_ids': list(entries.values()), 'inputs': [str(path)]})
+                count += len(entries)
+                bar.update()
+                if config['limit_episodes'] is not None and count >= config['limit_episodes']:
                     break
-        if output.exists():
-            raise ValueError(f'Output appeared during conversion: {output}')
-        staged.rename(output)
-    print(f'Exported {count} episodes to {output}', flush=True)
+        return tasks, []
+
+    @cached_property
+    def fk(self):
+        return G2FK(self.model_dir, self.params['eef_offset'])
+
+    def process(self, task, pending, staging, store, failed):
+        # One task is a whole archive, streamed once; episodes commit as they complete.
+        convert_archive(Path(task['source']), staging, self.fk, episode_ids=pending,
+                        on_episode=lambda record, directory: store.commit(record['episode_id'], directory, record),
+                        on_error=failed)
 
 
-def main():
-    from loom_data.convert.storage_budget import add_budget_arguments, run_budgeted_cli
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/AgiBotWorld2026')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/AgiBotWorld2026')
-    parser.add_argument('--model-dir', type=Path, default=ROOT / 'assets/robot_models/agibot_g2')
-    parser.add_argument('--eef-offset', type=float, nargs=3, default=DEFAULT_EEF_OFFSET,
-                        metavar=('X', 'Y', 'Z'), help='mounting origin in source flange, metres; default: flange origin')
-    parser.add_argument('--limit', type=int, help='convert only the first N sorted archives')
-    parser.add_argument('--limit-episodes', type=int, help='convert only the first N episodes across archives')
-    add_budget_arguments(parser)
-    args = parser.parse_args()
-    if args.limit is not None and args.limit < 1:
-        parser.error('--limit must be positive')
-    if args.limit_episodes is not None and args.limit_episodes < 1:
-        parser.error('--limit-episodes must be positive')
-    try:
-        if run_budgeted_cli(args, 'agibotworld2026'):
-            return
-        convert(args.input_dir, args.output_dir, args.model_dir, args.limit, args.limit_episodes, args.eef_offset)
-    except (RuntimeError, ValueError, OSError, KeyError, tarfile.TarError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()
+SOURCE = AgiBotWorld2026

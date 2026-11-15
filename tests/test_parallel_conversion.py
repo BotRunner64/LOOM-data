@@ -20,10 +20,14 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import support
 from loom_data import paths, resumable
 from loom_data import video as video_codecs
-from loom_data.convert import abc130k, agibotworld2026, parallel
-from loom_data.convert.parallel_adapters import Adapter, make_config
+from loom_data.convert import job as parallel
+from loom_data.sources import abc130k, agibotworld2026
+from loom_data.sources.galaxea import Galaxea
+from loom_data.sources.hifi_umi import HifiUmi
+from loom_data.convert.config import make_config
 from test_convert_hifi_umi import make_source as hifi_source, make_shard as hifi_shard
 from test_convert_molmoact2 import make_source as molmo_source, make_full_source as molmo_full_source
 import test_convert_galaxea as galaxea_tests
@@ -83,7 +87,7 @@ class HifiShardTests(unittest.TestCase):
             store = parallel.prepare(config, output)
             self.assertEqual(len(store.plan['tasks']), 2)
             self.assertEqual(len(store.ids), 4)
-            from loom_data.convert import hifi_umi
+            from loom_data.sources import hifi_umi
             extract = hifi_umi.extract_video_segment
 
             def interrupted(video, *args):
@@ -128,7 +132,7 @@ class HifiShardTests(unittest.TestCase):
             self.assertEqual(len(manifest(root / 'out')), 3)
             self.assertEqual(len({r['episode_id'] for r in manifest(root / 'out')}), 3)
             parallel.prepare(config, root / 'out')
-            with patch.object(Adapter, 'shard', side_effect=AssertionError('must skip published episodes')):
+            with patch.object(HifiUmi, 'process', side_effect=AssertionError('must skip published episodes')):
                 self.assertEqual(parallel.worker(root / 'out', 0, 1), 0)
             parallel.finalize(root / 'out')
 
@@ -196,7 +200,7 @@ class ResumeTests(unittest.TestCase):
             (stale / 'partial.mp4').write_bytes(b'partial')
             parallel.prepare(self.config, output)
             self.assertFalse(stale.exists())
-            with patch.object(Adapter, 'episode', autospec=True, side_effect=Adapter.episode) as convert:
+            with patch.object(HifiUmi, 'episode', autospec=True, side_effect=HifiUmi.episode) as convert:
                 for rank in range(3):
                     self.assertEqual(parallel.worker(output, rank, 3), 0)
                 if boundary == 'after_directory':
@@ -232,14 +236,14 @@ class ResumeTests(unittest.TestCase):
         with patch('sys.stdout', new_callable=io.StringIO) as initial:
             store = parallel.prepare(self.config, output)
         self.assertIn('0 exported, 0 skipped, 0 failed, 2 unfinished', initial.getvalue())
-        convert = Adapter.episode
+        convert = HifiUmi.episode
 
         def fail_first(adapter, task, destination):
             if destination.name == self.episode_id:
                 raise ValueError('injected conversion error')
             return convert(adapter, task, destination)
 
-        with patch.object(Adapter, 'episode', fail_first):
+        with patch.object(HifiUmi, 'episode', fail_first):
             self.assertEqual(parallel.worker(output, 0, 1), 1)
         self.assertIsNone(store.state(self.episode_id))
         self.assertIsNotNone(store.state('episode_000008'))
@@ -265,7 +269,7 @@ class ResumeTests(unittest.TestCase):
         add_hifi_episode(self.source, 8)
         output = self.root / 'skip_failed'
         store = parallel.prepare(self.config, output)
-        with patch.object(Adapter, 'episode', side_effect=ValueError('bad source')):
+        with patch.object(HifiUmi, 'episode', side_effect=ValueError('bad source')):
             self.assertEqual(parallel.worker(output, 0, 2), 1)
         self.assertEqual(parallel.worker(output, 1, 2), 0)
         parallel.finalize(output)
@@ -392,7 +396,7 @@ class ResumeTests(unittest.TestCase):
     def test_real_local_processes_and_idempotent_cli(self):
         add_hifi_episode(self.source, 8)
         output = self.root / 'processes'
-        command = [sys.executable, '-m', 'loom_data.convert.parallel', 'run', '--dataset', 'hifi_umi',
+        command = [sys.executable, '-m', 'loom_data', 'convert', 'run', '--dataset', 'hifi_umi',
                    '--input-dir', str(self.source), '--output-dir', str(output), '--left-eef-offset', '0', '0', '0', '--right-eef-offset', '0', '0', '0']
         for count in (2, 3):
             result = subprocess.run([*command, '--workers', str(count)], cwd=paths.ROOT,
@@ -406,7 +410,7 @@ class ResumeTests(unittest.TestCase):
     def test_cli_input_check_failure_keeps_task_and_traceback(self):
         source_file = self.source / 'episodes' / self.episode_id / 'episode.json'
         source_file.write_text(source_file.read_text() + ' ')
-        command = [sys.executable, '-m', 'loom_data.convert.parallel', 'worker',
+        command = [sys.executable, '-m', 'loom_data', 'convert', 'worker',
                    '--output-dir', str(self.output), '--worker-id', '0', '--worker-count', '1']
         for _ in range(2):
             result = subprocess.run(command, cwd=paths.ROOT, capture_output=True,
@@ -425,7 +429,7 @@ class ResumeTests(unittest.TestCase):
         output = self.root / 'not_prepared'
         env = {k: v for k, v in os.environ.items() if not k.startswith('SLURM_')}
         result = subprocess.run(
-            [sys.executable, '-m', 'loom_data.convert.parallel', 'worker', '--output-dir', str(output)],
+            [sys.executable, '-m', 'loom_data', 'convert', 'worker', '--output-dir', str(output)],
             env=env, cwd=paths.ROOT, capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(result.returncode, 1, result.stderr)
         log, = output.with_name(output.name + '.work').glob('logs/worker-*.err')
@@ -438,7 +442,7 @@ class ResumeTests(unittest.TestCase):
         code = '''
 import sys
 from unittest.mock import patch
-from loom_data.convert import parallel
+from loom_data.convert import job as parallel
 kind = sys.argv.pop()
 error = ImportError('injected dependency failure') if kind == 'import' else KeyboardInterrupt()
 with patch.object(parallel, 'configure_worker', side_effect=error):
@@ -460,7 +464,7 @@ with patch.object(parallel, 'configure_worker', side_effect=error):
         code = '''
 import os, resource, sys
 from unittest.mock import patch
-from loom_data.convert import parallel
+from loom_data.convert import job as parallel
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 with patch.object(parallel, 'configure_worker', side_effect=os.abort):
     sys.exit(parallel.main())
@@ -472,14 +476,14 @@ with patch.object(parallel, 'configure_worker', side_effect=os.abort):
         self.assertEqual(result.returncode, -signal.SIGABRT, result.stderr)
         log, = (self.store.work / 'logs').glob('worker-*.err')
         self.assertIn('Fatal Python error: Aborted', log.read_text())
-        self.assertIn('parallel.py', log.read_text())
+        self.assertIn('job.py', log.read_text())
 
     def test_sigkill_leaves_an_attempt_that_next_run_recovers(self):
         # Kill after persisting metadata; no Python finally blocks can clean up.
         code = '''
 import os, signal, sys
 from unittest.mock import patch
-from loom_data.convert import parallel
+from loom_data.convert import job as parallel
 original = parallel.atomic_json
 def committed_record(path, value):
     original(path, value)
@@ -510,7 +514,7 @@ with patch.object(parallel, 'atomic_json', side_effect=committed_record):
             env.pop('SLURM_NTASKS', None)
             if rank is not None:
                 env.update(SLURM_PROCID=str(rank), SLURM_NTASKS=str(count))
-            return subprocess.run([sys.executable, '-m', 'loom_data.convert.parallel', *args],
+            return subprocess.run([sys.executable, '-m', 'loom_data', 'convert', *args],
                                   env=env, cwd=paths.ROOT, capture_output=True,
                                   text=True, timeout=60, check=False)
 
@@ -543,14 +547,14 @@ with patch.object(parallel, 'atomic_json', side_effect=committed_record):
                 parallel.run(self.config, self.output)
 
 
-class SourceAdapterTests(unittest.TestCase):
+class SourceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
     def test_molmo_real_conversion_matches_standalone(self):
-        from loom_data.convert import molmoact2
+        from loom_data.sources import molmoact2
         source = self.root / 'raw'
         molmo_source(source)
         output = self.root / 'parallel'
@@ -559,14 +563,14 @@ class SourceAdapterTests(unittest.TestCase):
         self.assertEqual(parallel.worker(output, 0, 1), 0)
         parallel.finalize(output)
         reference = self.root / 'standalone'
-        molmoact2.convert(source, reference)
+        support.convert('molmoact2', source, reference)
         self.assertEqual(manifest(output), manifest(reference))
         for path in reference.rglob('*.parquet'):
             self.assertTrue(pq.read_table(path).equals(pq.read_table(output / path.relative_to(reference))))
 
     @unittest.skipUnless('libsvtav1' in av.codecs_available, 'AV1 encoder required')
     def test_molmo_full_dataset_resume_and_standalone_match(self):
-        from loom_data.convert import molmoact2
+        from loom_data.sources import molmoact2
         source = molmo_full_source(self.root / 'raw')
         output = self.root / 'parallel'
         config = make_config('molmoact2', source)
@@ -600,14 +604,14 @@ class SourceAdapterTests(unittest.TestCase):
         self.assertEqual(converted, [8])
         parallel.finalize(output)
         reference = self.root / 'standalone'
-        molmoact2.convert(source, reference)
+        support.convert('molmoact2', source, reference)
         self.assertEqual(manifest(output), manifest(reference))
         for path in reference.rglob('*.parquet'):
             self.assertTrue(pq.read_table(path).equals(pq.read_table(output / path.relative_to(reference))))
 
     @unittest.skipUnless('libsvtav1' in av.codecs_available, 'AV1 encoder required')
     def test_molmo_full_dataset_limits_and_bad_video_range_are_episode_local(self):
-        from loom_data.convert import molmoact2
+        from loom_data.sources import molmoact2
         source = molmo_full_source(self.root / 'raw')
         meta = source / 'meta/episodes/chunk-000/file-000.parquet'
         rows = pq.read_table(meta).to_pylist()
@@ -643,7 +647,7 @@ class SourceAdapterTests(unittest.TestCase):
         store = parallel.prepare(config, skipped_output)
         self.assertEqual(parallel.worker(skipped_output, 0, 1), 0)
         self.assertEqual(store.state('r1lite_episode_000000')['outcome'], 'skipped')
-        with patch.object(Adapter, 'episode', side_effect=AssertionError('must not reconvert')):
+        with patch.object(Galaxea, 'episode', side_effect=AssertionError('must not reconvert')):
             self.assertEqual(parallel.worker(skipped_output, 0, 1), 0)
         parallel.finalize(skipped_output)
         self.assertEqual([r['episode_id'] for r in manifest(skipped_output)], ['r1pro_episode_000000'])
@@ -774,7 +778,7 @@ class ArchiveResumeTests(unittest.TestCase):
                 self.assertEqual(transcode.call_count, 1)
             parallel.finalize(output)
             reference = root / 'reference'
-            agibotworld2026.convert(source, reference, Path(config['model_dir']))
+            support.convert('agibotworld2026', source, reference, model_dir=config['model_dir'])
             self.assertEqual(manifest(output), manifest(reference))
 
     def test_archive_failure_continues_and_global_limit_is_frozen(self):

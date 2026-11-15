@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """Convert AgiBot World Beta HDF5/MP4 episodes to the export contract."""
 from __future__ import annotations
 
-import argparse
+from functools import cached_property
 import json
 import math
 import os
@@ -12,12 +11,13 @@ from pathlib import Path
 import numpy as np
 
 from loom_data.sources.common import normalized_gripper
-from loom_data.geometry import pose_matrix, tool_transform
-from loom_data.contract import encode_pose as rotation9d, write_state, write_video_index
+from loom_data.geometry import eef_offset, pose_matrix, tool_transform
+from loom_data.contract import encode_pose, write_state, write_video_index
 from loom_data.video import transcode_video
 from loom_data.sources.policy import SourceDataError, source_value, stationary_base
 
-from loom_data.paths import ROOT
+from loom_data.sources.base import Source, task_limit
+
 REPO_ID = 'agibot-world/AgiBotWorld-Beta'
 CAMERAS = {f'{name}_color.mp4': name for name in (
     'head', 'hand_left', 'hand_right', 'head_center_fisheye', 'head_left_fisheye',
@@ -180,7 +180,7 @@ def poses(fields, transforms):
             flange = source_value('invalid_flange_pose', pose_matrix, fields['end/position'][i, k], fields['end/orientation'][i, k])
             # Recorded end poses already include the two-DoF waist, validated
             # against independent G1 FK. Adding torso FK again is incorrect.
-            result[f'{side}_eef'].append(rotation9d(world @ flange @ transforms[k]))
+            result[f'{side}_eef'].append(encode_pose(world @ flange @ transforms[k]))
     return result
 
 
@@ -254,40 +254,71 @@ def convert_episode(source, destination, transforms=None,
     return record
 
 
-def convert(source, output, limit=None, eef_offset=DEFAULT_EEF_OFFSET,
-            left_tool_rpy=DEFAULT_LEFT_TOOL_RPY, right_tool_rpy=DEFAULT_RIGHT_TOOL_RPY,
-            gripper_closed=DEFAULT_GRIPPER_CLOSED, gripper_open=DEFAULT_GRIPPER_OPEN):
-    from loom_data.convert.parallel import run_native
-    from loom_data.convert.parallel_adapters import make_config
-    config = make_config('agibotworld_beta', source, limit=limit, eef_offset=eef_offset,
-                         left_tool_rpy=left_tool_rpy, right_tool_rpy=right_tool_rpy,
-                         gripper_closed=gripper_closed, gripper_open=gripper_open)
-    run_native(config, output)
+class AgiBotWorldBeta(Source):
+    name = 'agibotworld_beta'
+    title = 'AgiBotWorld-Beta'
+    policy = 'drop'
+    OPTIONS = {
+        'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                           help='mounting origin in source flange axes, metres (default: flange origin)'),
+        'left_tool_rpy': dict(type=float, nargs=3, metavar=('R', 'P', 'Y'),
+                              help='left contract tool axes in the source flange, RPY radians'),
+        'right_tool_rpy': dict(type=float, nargs=3, metavar=('R', 'P', 'Y'),
+                               help='right contract tool axes in the source flange, RPY radians'),
+        'gripper_open': dict(type=float, help='measured source value at full open (provisional default 35)'),
+        'gripper_closed': dict(type=float, help='measured source value at full close (provisional default 120)'),
+    }
+
+    @classmethod
+    def make_params(cls, options):
+        params = {'data_policy_version': 1,
+                  'eef_offset': eef_offset(options['eef_offset'] if options['eef_offset'] is not None
+                                           else DEFAULT_EEF_OFFSET).tolist(),
+                  'gripper_open': DEFAULT_GRIPPER_OPEN if options['gripper_open'] is None else options['gripper_open'],
+                  'gripper_closed': DEFAULT_GRIPPER_CLOSED if options['gripper_closed'] is None else options['gripper_closed']}
+        normalized_gripper(0., params['gripper_closed'], params['gripper_open'])
+        for side, default in (('left', DEFAULT_LEFT_TOOL_RPY), ('right', DEFAULT_RIGHT_TOOL_RPY)):
+            override = options[f'{side}_tool_rpy']
+            params[f'{side}_tool_rpy'] = list(override if override is not None else default)
+            tool_transform(params['eef_offset'], params[f'{side}_tool_rpy'])
+        return params
+
+    @classmethod
+    def discover(cls, config, progress):
+        source = Path(config['source'])
+        shared = [source / 'subset_manifest.json'] if (source / 'subset_manifest.json').exists() else []
+        tasks = []
+        with progress('Discovering native-pose episodes', unit='episode') as bar:
+            for episode_id, item in islice(iter_discover(source), task_limit(config)):
+                task_id = int(item['state'].parent.parent.name)
+                shared.append(source / f'task_info/task_{task_id}.json')
+                tasks.append({'source': str(item['state']),
+                              'videos': {camera: str(path) for camera, path in item['videos'].items()},
+                              'annotation_path': str(item['annotation_path']),
+                              'episode_index': item['episode_index'], 'episode_ids': [episode_id],
+                              'inputs': [str(item['state']), *(str(p) for p in item['videos'].values())]})
+                if 'drop' in item:
+                    tasks[-1]['drop'] = item['drop']
+                bar.update()
+        return tasks, shared
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.annotations = (None, None)  # (annotation file, its parsed episodes); tasks arrive grouped by file
+
+    @cached_property
+    def transforms(self):
+        return tuple(tool_transform(self.params['eef_offset'], self.params[f'{side}_tool_rpy'])
+                     for side in ('left', 'right'))
+
+    def episode(self, task, destination):
+        state, path = Path(task['source']), Path(task['annotation_path'])
+        if self.annotations[0] != path:
+            self.annotations = (path, load_annotations(path.parents[1], int(state.parent.parent.name)))
+        annotation = self.annotations[1][task['episode_index']]
+        return convert_episode({'state': state, 'videos': {c: Path(p) for c, p in task['videos'].items()},
+                                **annotation}, destination, self.transforms,
+                               self.params['gripper_closed'], self.params['gripper_open'])
 
 
-def main():
-    from loom_data.convert.storage_budget import add_budget_arguments, run_budgeted_cli
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/AgiBotWorld-Beta')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/AgiBotWorld-Beta')
-    parser.add_argument('--limit', type=int)
-    parser.add_argument('--eef-offset', nargs=3, type=float, default=DEFAULT_EEF_OFFSET, help='mounting origin in source flange axes, metres; default: flange origin')
-    parser.add_argument('--left-tool-rpy', nargs=3, type=float, default=DEFAULT_LEFT_TOOL_RPY)
-    parser.add_argument('--right-tool-rpy', nargs=3, type=float, default=DEFAULT_RIGHT_TOOL_RPY)
-    parser.add_argument('--gripper-open', type=float, default=DEFAULT_GRIPPER_OPEN, help='measured source value at full open; provisional default 35')
-    parser.add_argument('--gripper-closed', type=float, default=DEFAULT_GRIPPER_CLOSED, help='measured source value at full close; provisional default 120')
-    add_budget_arguments(parser)
-    args = parser.parse_args()
-    if args.limit is not None and args.limit < 1:
-        parser.error('--limit must be positive')
-    try:
-        if run_budgeted_cli(args, 'agibotworld_beta'):
-            return
-        convert(args.input_dir, args.output_dir, args.limit, args.eef_offset,
-                args.left_tool_rpy, args.right_tool_rpy, args.gripper_closed, args.gripper_open)
-    except (ValueError, OSError, KeyError, RuntimeError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()
+SOURCE = AgiBotWorldBeta

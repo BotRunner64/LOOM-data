@@ -1,6 +1,7 @@
 """Local LeRobot v3 frame tables, episode metadata, and frame-accurate video cuts."""
 import json
 import math
+import re
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -97,3 +98,19 @@ class LeRobotV3Reader:
             raise ValueError(f'{path}: episode {index} range is outside its data file')
         rows = self.table.slice(start, row['length']).to_pydict()
         return rows
+
+
+def subset_tasks(source, cameras, limit, progress):
+    """Tasks for the downloader's per-episode layout: episodes/episode_N/{data.parquet, episode.json, videos/}."""
+    episodes = sorted(p for p in (source / 'episodes').iterdir() if p.is_dir())
+    selected = episodes if limit is None else episodes[:limit]
+    tasks = []
+    with progress('Discovering episodes', len(selected), unit='episode') as bar:
+        for path in selected:
+            if not re.fullmatch(r'episode_\d+', path.name):
+                raise ValueError(f'Invalid episode directory: {path}')
+            tasks.append({'source': str(path), 'episode_ids': [path.name],
+                          'inputs': [str(path / 'data.parquet'), str(path / 'episode.json'),
+                                     *(str(path / 'videos' / f'{key}.mp4') for key in cameras)]})
+            bar.update()
+    return tasks

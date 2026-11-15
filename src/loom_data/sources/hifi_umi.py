@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """Convert HiFi-UMI-2K local LeRobot v3 shards or an extracted episode subset."""
 from __future__ import annotations
 
-import argparse
+from functools import cached_property
 import json
 from pathlib import Path
 import re
@@ -16,10 +15,11 @@ from loom_data.geometry import eef_offset as validate_eef_offset
 from loom_data.contract import seconds_to_ns, write_state, write_video_index
 from loom_data.sources.common import task_instructions as instructions
 
-from loom_data.convert.lerobot_v3 import LeRobotV3Reader
+from loom_data.sources.lerobot_v3 import LeRobotV3Reader, subset_tasks
 from loom_data.video import extract_video_segment
 
-from loom_data.paths import ROOT
+from loom_data.sources.base import Source, task_limit
+
 # Body-fixed virtual fingertip -> nominal rear/pivot datum, from the vendor's
 # approximate 12 cm finger length. Tracking paper + a real opening-only sample
 # support a rigid raw frame; see source.md for evidence and remaining limits.
@@ -215,92 +215,79 @@ class ShardReader(LeRobotV3Reader):
                                  row['videos'][key], target, len(times), self.fps))
 
 
-def convert(source, output, *, gripper_open_rad=DEFAULT_GRIPPER_OPEN_RAD,
-            gripper_closed_rad=0., limit=None, left_eef_offset=None, right_eef_offset=None):
-    offsets = mounting_offsets(left_eef_offset, right_eef_offset)
-    validate_gripper_range(gripper_closed_rad, gripper_open_rad)
-    if limit is not None and (type(limit) is not int or limit < 1):
-        raise ValueError('limit must be a positive integer')
-    if output.exists():
-        raise ValueError(f'Output already exists; choose a new directory: {output}')
-    if not (source / 'source').is_dir():
-        return convert_shards(source, output, gripper_closed_rad, gripper_open_rad, limit, offsets)
-    validate_source(json.loads((source / 'source/info.json').read_text(encoding='utf-8')),
-                    json.loads((source / 'source/modality.json').read_text(encoding='utf-8')))
-    tasks = load_tasks(source / 'source/tasks.parquet')
-    episodes = sorted(p for p in (source / 'episodes').iterdir() if p.is_dir())
-    if not episodes or any(not re.fullmatch(r'episode_\d+', p.name) for p in episodes):
-        raise ValueError(f'No episodes or invalid episode directory names under {source}')
-    episodes = episodes[:limit]
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
-        staged = Path(temporary) / 'dataset'
-        staged.mkdir()
-        with (staged / 'episodes.jsonl').open('w', encoding='utf-8') as handle:
-            for i, episode in enumerate(episodes, 1):
-                print(f'[{i}/{len(episodes)}] {episode.name}', flush=True)
-                record = convert_episode(episode, staged / 'episodes' / episode.name,
-                                         tasks, gripper_closed_rad, gripper_open_rad, offsets)
-                handle.write(json.dumps(record, ensure_ascii=False) + '\n')
-        if output.exists():
-            raise ValueError(f'Output appeared during conversion: {output}')
-        staged.rename(output)
-    print(f'Exported {len(episodes)} episodes to {output}', flush=True)
+class HifiUmi(Source):
+    name = 'hifi_umi'
+    title = 'HiFi-UMI-2K'
+    OPTIONS = {
+        'left_eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                                help='left mounting origin in the source virtual fingertip axes, metres (default -0.12 0 0)'),
+        'right_eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                                 help='right mounting origin in the source virtual fingertip axes, metres (default -0.12 0 0)'),
+        'gripper_open_rad': dict(type=float, help='fully open single-finger angle (default 35 degrees)'),
+        'gripper_closed_rad': dict(type=float, help='closed angle (default 0)'),
+    }
 
+    @classmethod
+    def make_params(cls, options):
+        opened = DEFAULT_GRIPPER_OPEN_RAD if options['gripper_open_rad'] is None else options['gripper_open_rad']
+        closed = 0. if options['gripper_closed_rad'] is None else options['gripper_closed_rad']
+        validate_gripper_range(closed, opened)
+        return {'gripper_open_rad': opened, 'gripper_closed_rad': closed,
+                'eef_offsets': mounting_offsets(options['left_eef_offset'], options['right_eef_offset'])}
 
-def convert_shards(source, output, closed_rad, open_rad, limit, eef_offsets=None):
-    offsets = mounting_offsets((eef_offsets or {}).get('left'), (eef_offsets or {}).get('right'))
-    shards = discover_shards(source)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    with tempfile.TemporaryDirectory(prefix=f'.{output.name}-', dir=output.parent) as temporary:
-        staged = Path(temporary) / 'dataset'
-        staged.mkdir()
-        with (staged / 'episodes.jsonl').open('w', encoding='utf-8') as handle:
+    @classmethod
+    def discover(cls, config, progress):
+        source, limit = Path(config['source']), task_limit(config)
+        if (source / 'source').is_dir():  # episode subset written by the downloader
+            meta = source / 'source'
+            validate_source(json.loads((meta / 'info.json').read_text(encoding='utf-8')),
+                            json.loads((meta / 'modality.json').read_text(encoding='utf-8')))
+            load_tasks(meta / 'tasks.parquet')
+            shared = [meta / name for name in ('info.json', 'tasks.parquet', 'modality.json')]
+            return subset_tasks(source, CAMERAS, limit, progress), shared
+        tasks, shared = [], []
+        shards = discover_shards(source)
+        with progress('Indexing HiFi-UMI shards', len(shards), unit='shard') as bar:
             for shard in shards:
                 reader = ShardReader(shard)
-                remaining = None if limit is None else limit - count
-                for index in sorted(reader.episodes)[:remaining]:
-                    episode_id = shard_episode_id(shard, index)
-                    print(f'[{count + 1}] {episode_id}', flush=True)
-                    record = reader.convert_episode(index, staged / 'episodes' / episode_id, closed_rad, open_rad, offsets)
-                    handle.write(json.dumps(record, ensure_ascii=False) + '\n')
-                    count += 1
-                # Release the frame table before indexing/loading the next shard.
-                del reader
-                if limit is not None and count >= limit:
-                    break
-        if output.exists():
-            raise ValueError(f'Output appeared during conversion: {output}')
-        staged.rename(output)
-    print(f'Exported {count} episodes to {output}', flush=True)
+                indices = sorted(reader.episodes)[:limit]
+                if indices:
+                    shared.extend(shard / 'meta' / name for name in ('info.json', 'modality.json', 'tasks.parquet'))
+                    tasks.append({'source': str(shard), 'layout': 'lerobot_v3_shard',
+                                  'episode_ids': [shard_episode_id(shard, i) for i in indices],
+                                  'inputs': [str(p) for p in reader.inputs(indices)]})
+                bar.update()
+                if limit is not None:
+                    limit -= len(indices)
+                    if limit == 0:
+                        break
+        return tasks, shared
+
+    @cached_property
+    def tasks(self):
+        return load_tasks(self.root / 'source/tasks.parquet')
+
+    def episode(self, task, destination):
+        params = self.params
+        return convert_episode(Path(task['source']), destination, self.tasks,
+                               params['gripper_closed_rad'], params['gripper_open_rad'], params['eef_offsets'])
+
+    def process(self, task, pending, staging, store, failed):
+        if task.get('layout') != 'lerobot_v3_shard':
+            return super().process(task, pending, staging, store, failed)
+        # One task is a whole shard: its frame table is loaded once for all episodes.
+        source, params = Path(task['source']), self.params
+        reader = ShardReader(source)
+        indices = {shard_episode_id(source, i): i for i in reader.episodes}
+        for episode_id in pending:
+            with tempfile.TemporaryDirectory(prefix='episode-', dir=staging) as temporary:
+                destination = Path(temporary) / episode_id
+                try:
+                    record = reader.convert_episode(indices[episode_id], destination, params['gripper_closed_rad'],
+                                                    params['gripper_open_rad'], params['eef_offsets'])
+                    store.commit(episode_id, destination, record)
+                except Exception as exc:
+                    failed(episode_id, exc)
 
 
-def main():
-    from loom_data.convert.storage_budget import add_budget_arguments, run_budgeted_cli
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-dir', type=Path, default=ROOT / 'dataset/raw/HiFi-UMI-2K')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'dataset/processed/HiFi-UMI-2K')
-    parser.add_argument('--limit', type=int, help='convert only the first N sorted episodes')
-    for side in ('left', 'right'):
-        parser.add_argument(f'--{side}-eef-offset', type=float, nargs=3, default=DEFAULT_EEF_OFFSET,
-                            help=f'{side} mounting origin in the source virtual fingertip axes, metres; default: nominal [-0.12, 0, 0]')
-    parser.add_argument('--gripper-closed-rad', type=float, default=0.,
-                        help='fixed dataset-wide closed angle (default: 0)')
-    parser.add_argument('--gripper-open-rad', type=float, default=DEFAULT_GRIPPER_OPEN_RAD,
-                        help='fully open single-finger angle (default: 35 degrees = 0.6108652382 rad)')
-    add_budget_arguments(parser)
-    args = parser.parse_args()
-    import av
-    try:
-        if run_budgeted_cli(args, 'hifi_umi'):
-            return
-        convert(args.input_dir, args.output_dir, gripper_open_rad=args.gripper_open_rad,
-                gripper_closed_rad=args.gripper_closed_rad, limit=args.limit,
-                left_eef_offset=args.left_eef_offset, right_eef_offset=args.right_eef_offset)
-    except (RuntimeError, ValueError, OSError, av.FFmpegError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
-
-
-if __name__ == '__main__':
-    main()
+SOURCE = HifiUmi

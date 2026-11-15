@@ -11,8 +11,10 @@ from unittest.mock import patch
 import h5py
 import numpy as np
 
-from loom_data.convert import agibotworld_beta as beta, parallel, realomin
-from loom_data.convert.parallel_adapters import discover as discover_plan, make_config
+from support import convert
+from loom_data.convert import job as parallel
+from loom_data.sources import agibotworld_beta as beta, realomin
+from loom_data.convert.config import discover as discover_plan, make_config
 from loom_data.sources.policy import SourceDataError
 from test_convert_agibotworld_beta import make_source
 
@@ -84,7 +86,7 @@ class BaseRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);path=make_source(root/'raw')
             with h5py.File(path,'a') as h:h['action/end/position']=np.zeros((1,2,3))
-            beta.convert(root/'raw',root/'out')
+            convert('agibotworld_beta', root/'raw',root/'out')
             self.assertEqual(len((root/'out/episodes.jsonl').read_text().splitlines()),1)
 
 
@@ -93,7 +95,7 @@ class NativeDropTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);state=make_source(root/'raw')
             state.write_bytes(b'not an HDF5 file')
-            beta.convert(root/'raw',root/'out')
+            convert('agibotworld_beta', root/'raw',root/'out')
             s=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual(s['drop_reasons'],{'invalid_hdf5':1})
         with patch('h5py.File',side_effect=OSError('storage read failed without errno')):
@@ -107,7 +109,7 @@ class NativeDropTests(unittest.TestCase):
             rows.append(copy.deepcopy(rows[0]))
             conflict=copy.deepcopy(rows[1]);conflict['task_name']='Conflicting task';rows.append(conflict)
             path.write_text(json.dumps(rows))
-            beta.convert(root/'raw',root/'out')
+            convert('agibotworld_beta', root/'raw',root/'out')
             summary=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual((summary['planned'],summary['exported'],summary['repaired'],summary['dropped']),(2,1,1,1))
             self.assertEqual(summary['repair_reasons'],{'deduplicated_annotation':1})
@@ -123,7 +125,7 @@ class NativeDropTests(unittest.TestCase):
             (root/'raw/task_info/task_694.json').unlink()
             shutil.rmtree(root/'raw/observations')
             with patch.object(beta,'convert_episode',side_effect=AssertionError('must preflight-drop')):
-                beta.convert(root/'raw',root/'out')
+                convert('agibotworld_beta', root/'raw',root/'out')
             s=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual(s['dropped'],1);self.assertEqual(s['drop_fraction'],1.)
             self.assertEqual(s['drop_reasons'],{'missing_annotation':1,'missing_rgb':1})
@@ -278,7 +280,7 @@ class NativeDropTests(unittest.TestCase):
             root=Path(temporary);source=root/'raw/Clutter Tidy-Up [Stage2]/00001/00001.mcap'
             source.parent.mkdir(parents=True);source.write_bytes(b'not an MCAP')
             self.assertEqual(realomin.discover(root/'raw')[0][1]['instruction'],'Clutter Tidy-Up [Stage2]')
-            realomin.convert(root/'raw',root/'out', eef_offset=[0., 0., 0.])
+            convert('realomin', root/'raw',root/'out', eef_offset=[0., 0., 0.])
             s=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual(s['drop_reasons'],{'invalid_mcap':1})
 
@@ -287,7 +289,7 @@ class NativeDropTests(unittest.TestCase):
             root=Path(temporary);source=root/'raw/clean_bowl/1/1.mcap'
             source.parent.mkdir(parents=True);source.touch()
             with patch.object(realomin,'messages',return_value=iter(())),patch.object(realomin,'VideoWriter') as video:
-                realomin.convert(root/'raw',root/'out', eef_offset=[0., 0., 0.])
+                convert('realomin', root/'raw',root/'out', eef_offset=[0., 0., 0.])
             video.assert_not_called()
             s=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual(s['drop_reasons'],{'missing_state_stream':1})

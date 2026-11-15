@@ -8,9 +8,11 @@ import unittest
 import numpy as np
 import pyarrow.parquet as pq
 
-from loom_data.convert import hifi_umi, parallel, realomin
+from support import assert_conversion_fails, convert
+from loom_data.convert import job as parallel
+from loom_data.sources import hifi_umi, realomin
 from loom_data.contract import validate_episode
-from loom_data.convert.parallel_adapters import make_config
+from loom_data.convert.config import make_config
 from loom_data.robot.kinematics import rpy_matrix
 from test_convert_hifi_umi import make_source, make_shard
 
@@ -47,8 +49,7 @@ class MountOriginTests(unittest.TestCase):
             hifi_config = make_config('hifi_umi', source, left_eef_offset=[-.15, 0, 0])
             self.assertEqual(hifi_config['params']['eef_offsets'],
                              {'left': [-.15, 0, 0], 'right': [-.12, 0, 0]})
-            with self.assertRaisesRegex(ValueError, 'three finite metres'):
-                hifi_umi.convert(source, root / 'output', left_eef_offset=[0, 0, float('inf')])
+            assert_conversion_fails(self, 'three finite metres', 'hifi_umi', source, root / 'output', left_eef_offset=[0, 0, float('inf')])
             self.assertFalse((root / 'output').exists())
             self.assertFalse((root / 'episode').exists())
 
@@ -73,7 +74,7 @@ class MountOriginTests(unittest.TestCase):
             with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (make_source if layout == 'subset' else make_shard)(root / 'raw')
-                hifi_umi.convert(root / 'raw', root / 'serial')
+                convert('hifi_umi', root / 'raw', root / 'serial')
                 config = make_config('hifi_umi', root / 'raw')
                 self.assertEqual(config['params']['eef_offsets'],
                                  {'left': [-.12, 0., 0.], 'right': [-.12, 0., 0.]})
@@ -92,9 +93,9 @@ class MountOriginTests(unittest.TestCase):
                             np.testing.assert_allclose(np.array(table['pose'].to_pylist())[:, :3],
                                                        np.tile(expected[side], (table.num_rows, 1)), atol=1e-7)
                 if layout == 'subset':
-                    command = [sys.executable, '-m', 'loom_data.convert.hifi_umi',
+                    command = [sys.executable, '-m', 'loom_data', 'convert', 'run', '--dataset', 'hifi_umi',
                                '--input-dir', str(root / 'raw'), '--output-dir', str(root / 'cli')]
-                    result = subprocess.run(command, cwd=hifi_umi.ROOT, capture_output=True, text=True, timeout=30)
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     for side in ('left', 'right'):
                         path = relative / 'state' / f'{side}_eef.parquet'
@@ -112,7 +113,7 @@ class MountOriginTests(unittest.TestCase):
                 (make_source if layout == 'subset' else make_shard)(source)
                 originals = {p: p.read_bytes() for p in source.rglob('*.parquet')}
                 serial, concurrent = root / 'serial', root / 'parallel'
-                hifi_umi.convert(source, serial, **offsets)
+                convert('hifi_umi', source, serial, **offsets)
                 config = make_config('hifi_umi', source, **offsets)
                 parallel.prepare(config, concurrent)
                 self.assertEqual(parallel.worker(concurrent, 0, 1), 0)
