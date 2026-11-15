@@ -335,7 +335,6 @@ def convert_archive(path, staged, fk, episode_limit=None, *, episode_ids=None,
 
 class AgiBotWorld2026(Source):
     name = 'agibotworld2026'
-    title = 'AgiBotWorld2026'
     model = 'agibot_g2'
     accepts_file = True  # one .tar.gz archive
     OPTIONS = {

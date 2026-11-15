@@ -5,7 +5,7 @@ import unittest
 
 from huggingface_hub.hf_api import RepoFile
 
-from loom_data.download import hifi_umi_subset as script
+from loom_data.download import episodes, hifi_umi as script, hub
 
 
 SHA = 'a' * 40
@@ -89,24 +89,24 @@ class ClassifyTests(unittest.TestCase):
 class SamplingTests(unittest.TestCase):
     def test_smallest_orders_by_length_then_index(self):
         episodes = [episode(2, 50), episode(0, 10), episode(1, 50)]
-        selected = script.sample_episodes(episodes, 2, 42, 'smallest')
+        selected = script.sample_episodes(episodes, 2, 42, 'smallest', script.REPO_ID)
         self.assertEqual([item['episode_index'] for item in selected], [0, 1])
 
     def test_random_is_deterministic_and_seed_sensitive(self):
         episodes = [episode(index, 10) for index in range(50)]
-        first = script.sample_episodes(episodes, 5, 42, 'random')
-        self.assertEqual(first, script.sample_episodes(list(reversed(episodes)), 5, 42, 'random'))
+        first = script.sample_episodes(episodes, 5, 42, 'random', script.REPO_ID)
+        self.assertEqual(first, script.sample_episodes(list(reversed(episodes)), 5, 42, 'random', script.REPO_ID))
         self.assertEqual(len({item['episode_index'] for item in first}), 5)
-        self.assertNotEqual(first, script.sample_episodes(episodes, 5, 43, 'random'))
+        self.assertNotEqual(first, script.sample_episodes(episodes, 5, 43, 'random', script.REPO_ID))
 
 
 class FrameTests(unittest.TestCase):
     def test_frame_in_segment_is_half_open(self):
-        self.assertTrue(script.frame_in_segment(10.0, 10.0, 20.0))
-        self.assertTrue(script.frame_in_segment(19.96, 10.0, 20.0))
-        self.assertFalse(script.frame_in_segment(20.0, 10.0, 20.0))
-        self.assertFalse(script.frame_in_segment(9.96, 10.0, 20.0))
-        self.assertFalse(script.frame_in_segment(None, 10.0, 20.0))
+        self.assertTrue(episodes.frame_in_segment(10.0, 10.0, 20.0))
+        self.assertTrue(episodes.frame_in_segment(19.96, 10.0, 20.0))
+        self.assertFalse(episodes.frame_in_segment(20.0, 10.0, 20.0))
+        self.assertFalse(episodes.frame_in_segment(9.96, 10.0, 20.0))
+        self.assertFalse(episodes.frame_in_segment(None, 10.0, 20.0))
 
 
 class ManifestTests(unittest.TestCase):
@@ -114,7 +114,7 @@ class ManifestTests(unittest.TestCase):
         value = manifest()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'manifest.json'
-            script.write_json(path, value)
+            hub.write_json(path, value)
             self.assertEqual(script.load_manifest(path), value)
 
     def test_manifest_rejects_bad_paths_and_revision(self):

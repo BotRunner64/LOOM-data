@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import httpx
 
-from loom_data.download import galaxea_subset as script
+from loom_data.download import galaxea as script, hub
 
 
 SHA = 'a' * 40
@@ -62,17 +62,17 @@ class ManifestTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'manifest.json'
-            script.write_json(path, manifest)
-            self.assertEqual(script.load_manifest(path), manifest)
+            hub.write_json(path, manifest)
+            self.assertEqual(hub.load_manifest(path, script.REPO_ID), manifest)
             for invalid in ('../outside', '/absolute', 'lerobot/../../outside'):
                 manifest['files'][0]['path'] = invalid
                 path.write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
-                    script.load_manifest(path)
+                    hub.load_manifest(path, script.REPO_ID)
             manifest['revision'] = 'main'
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, 'commit SHA'):
-                script.load_manifest(path)
+                hub.load_manifest(path, script.REPO_ID)
 
 
 class DownloadTests(unittest.TestCase):
@@ -88,7 +88,7 @@ class DownloadTests(unittest.TestCase):
                 return str(destination)
 
             download.side_effect = fetch
-            script.download_file({'path': 'lerobot/a.tar.gz', 'size': 3}, SHA, Path(directory), 0)
+            hub.download_file(script.REPO_ID, SHA, {'path': 'lerobot/a.tar.gz', 'size': 3}, Path(directory), 0)
             self.assertEqual(download.call_count, 2)
             for call in download.call_args_list:
                 self.assertEqual(call.kwargs['revision'], SHA)
@@ -125,11 +125,11 @@ class RetryTests(unittest.TestCase):
         response = httpx.Response(status, request=httpx.Request('GET', 'https://huggingface.co'))
         return httpx.HTTPStatusError('error', request=response.request, response=response)
 
-    @patch.object(script.time, 'sleep')
+    @patch.object(hub.time, 'sleep')
     def test_authentication_failure_is_not_retried(self, sleep):
         operation = unittest.mock.Mock(side_effect=self.error(401))
         with self.assertRaises(httpx.HTTPStatusError):
-            script.retry(operation, 3)
+            hub.retry(operation, 3)
         self.assertEqual(operation.call_count, 1)
         sleep.assert_not_called()
 

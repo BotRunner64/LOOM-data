@@ -104,7 +104,6 @@ def convert_episode(source, destination, fk):
 
 class Abc130k(Source):
     name = 'abc130k'
-    title = 'ABC-130K'
     model = 'yam'
 
     @classmethod

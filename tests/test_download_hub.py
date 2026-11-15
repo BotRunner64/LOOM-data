@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from loom_data.download.subset_common import download_files, load_manifest, write_json
-from loom_data.download.realomin_subset import REPO_ID
+from loom_data.download.hub import download_files, load_manifest, write_json
+from loom_data.download.realomin import REPO_ID
 
 
 class SharedSubsetTests(unittest.TestCase):

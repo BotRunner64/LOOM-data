@@ -6,4 +6,5 @@ ROOT = Path(os.environ.get('LOOM_DATA_ROOT') or Path(__file__).resolve().parents
 RAW = ROOT / 'dataset/raw'
 EXPORT = ROOT / 'dataset/export'
 WORK = ROOT / 'dataset/work'
+MANIFESTS = ROOT / 'dataset/manifests'
 MODELS = ROOT / 'assets/robot_models'

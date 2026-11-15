@@ -1,21 +1,17 @@
-#!/usr/bin/env python3
 """Select and download complete MCAP trajectories from 10Kh-RealOmin-OpenData."""
-
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timezone
-from pathlib import Path
 import random
-import sys
 
-from loom_data.download.subset_common import (
-    ENDPOINT, configure_hub, download_files, format_size, load_manifest,
-    positive_int, prepare_output, retry, safe_path, write_json,
+from loom_data.download.hub import (
+    ENDPOINT, download_subset, format_size, load_manifest, positive_int, resolve_revision, retry, safe_path,
+    write_json,
 )
 
 REPO_ID = "genrobot2025/10Kh-RealOmin-OpenData"
-DEFAULT_MANIFEST = Path("dataset/manifests/realomin-clean-bowl-5.json")
+MANIFEST = "realomin-clean-bowl-5.json"
+WORKERS = 3
 
 
 def select(args) -> None:
@@ -25,7 +21,7 @@ def select(args) -> None:
     if args.manifest.exists():
         raise ValueError(f"Manifest already exists: {args.manifest}")
     api = HfApi(endpoint=ENDPOINT)
-    revision = retry(lambda: api.dataset_info(REPO_ID, revision=args.revision, expand=["sha"]).sha, args.retries)
+    revision = resolve_revision(api, REPO_ID, args.revision, args.retries)
     entries = retry(lambda: list(api.list_repo_tree(
         REPO_ID, path_in_repo=safe_path(args.prefix), repo_type="dataset",
         revision=revision, recursive=True,
@@ -57,36 +53,15 @@ def select(args) -> None:
 
 
 def download(args) -> None:
-    manifest = load_manifest(args.manifest, REPO_ID)
-    prepare_output(manifest, args.output_dir)
-    download_files(manifest, args.output_dir, args.workers, args.retries)
-    write_json(args.output_dir / "download_failures.json", {"files": []})
-    print("Download complete.", flush=True)
+    download_subset(load_manifest(args.manifest, REPO_ID), args.output_dir, args.workers, args.retries, every=1)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-    for name, function in (("select", select), ("download", download)):
-        command = commands.add_parser(name)
-        command.set_defaults(function=function)
-        command.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-        command.add_argument("--retries", type=int, default=3)
-        if name == "select":
-            command.add_argument("--prefix", default="Cooking_and_Kitchen_Clean/clean_bowl/00001")
-            command.add_argument("--count", type=positive_int, default=5)
-            command.add_argument("--strategy", choices=("smallest", "random"), default="random")
-            command.add_argument("--seed", type=int, default=42)
-            command.add_argument("--revision", default="main")
-        else:
-            command.add_argument("--output-dir", type=Path, default=Path("dataset/raw/10Kh-RealOmin-OpenData"))
-            command.add_argument("--workers", type=positive_int, default=3)
-    args = parser.parse_args()
-    if args.retries < 0:
-        parser.error("--retries must be nonnegative")
-    configure_hub()
-    args.function(args)
+def add_arguments(command, name) -> None:
+    if name == "select":
+        command.add_argument("--prefix", default="Cooking_and_Kitchen_Clean/clean_bowl/00001")
+        command.add_argument("--count", type=positive_int, default=5)
+        command.add_argument("--strategy", choices=("smallest", "random"), default="random")
+        command.add_argument("--seed", type=int, default=42)
 
 
-if __name__ == "__main__":
-    main()
+COMMANDS = {"select": select, "download": download}

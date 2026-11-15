@@ -66,7 +66,7 @@ def episode_keys(source):
     """Sort one task at a time, without traversing every video/depth directory."""
     manifest_path = source / 'subset_manifest.json'
     if manifest_path.exists():
-        from loom_data.download.subset_common import load_manifest
+        from loom_data.download.hub import load_manifest
         manifest = load_manifest(manifest_path, REPO_ID)
         episodes = sorted((e['task_id'], e['episode_id']) for e in manifest['episodes'])
         if len(set(episodes)) != len(episodes):
@@ -256,7 +256,6 @@ def convert_episode(source, destination, transforms=None,
 
 class AgiBotWorldBeta(Source):
     name = 'agibotworld_beta'
-    title = 'AgiBotWorld-Beta'
     policy = 'drop'
     OPTIONS = {
         'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),

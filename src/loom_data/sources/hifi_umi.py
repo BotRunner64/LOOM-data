@@ -217,7 +217,6 @@ class ShardReader(LeRobotV3Reader):
 
 class HifiUmi(Source):
     name = 'hifi_umi'
-    title = 'HiFi-UMI-2K'
     OPTIONS = {
         'left_eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
                                 help='left mounting origin in the source virtual fingertip axes, metres (default -0.12 0 0)'),

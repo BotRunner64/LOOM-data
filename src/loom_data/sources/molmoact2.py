@@ -146,7 +146,6 @@ class DatasetReader(LeRobotV3Reader):
 
 class MolmoAct2(Source):
     name = 'molmoact2'
-    title = 'MolmoAct2-BimanualYAM'
     model = 'yam'
 
     @classmethod

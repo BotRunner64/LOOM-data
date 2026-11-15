@@ -478,7 +478,7 @@ def main(argv=None):
             return 0
         if args.command == 'run' and args.workers < 1:
             raise ValueError('--workers must be positive')
-        title = sources.get(args.dataset).title
+        title = sources.TITLES[args.dataset]
         if args.input_dir is None:
             args.input_dir = paths.ROOT / 'dataset/raw' / title
         if args.output_dir is None:

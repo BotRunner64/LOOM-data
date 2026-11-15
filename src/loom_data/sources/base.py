@@ -22,7 +22,6 @@ def task_limit(config):
 
 class Source:
     name = None           # dataset key used on the command line and in plans
-    title = None          # upstream dataset name; default folder under dataset/raw and dataset/export
     model = None          # default folder under assets/robot_models ('' = that folder itself); None = no robot model
     accepts_file = False  # the input may be a single file instead of a directory
     # strict: every planned episode must convert.

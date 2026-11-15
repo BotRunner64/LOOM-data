@@ -4,7 +4,7 @@ import tarfile
 import tempfile
 import unittest
 
-from loom_data.download import agibotworld_beta_subset as script
+from loom_data.download import agibotworld_beta as script
 
 
 def make_tar(path, members):

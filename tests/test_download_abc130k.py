@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import httpx
 from huggingface_hub.hf_api import RepoFile, RepoFolder
 
-from loom_data.download import abc_subset as script
+from loom_data.download import abc130k as script, hub
 
 
 SHA = 'a' * 40
@@ -80,7 +80,7 @@ class DownloadTests(unittest.TestCase):
                 return str(destination)
 
             download.side_effect = fetch
-            script.download_file({'path': f'{TASK}/episode_a/episode.mcap', 'size': 3}, SHA, Path(directory), 0)
+            hub.download_file(script.REPO_ID, SHA, {'path': f'{TASK}/episode_a/episode.mcap', 'size': 3}, Path(directory), 0)
             self.assertEqual(download.call_count, 2)
             for call in download.call_args_list:
                 self.assertEqual(call.kwargs['revision'], SHA)
@@ -93,9 +93,9 @@ class DownloadTests(unittest.TestCase):
             destination = Path(directory) / 'episode.mcap'
             destination.write_bytes(b'xxx')
             download.return_value = str(destination)
-            script.download_file({'path': 'episode.mcap', 'size': 3}, SHA, Path(directory), 0)
+            hub.download_file(script.REPO_ID, SHA, {'path': 'episode.mcap', 'size': 3}, Path(directory), 0)
             self.assertEqual(download.call_count, 1)
-            self.assertNotIn('force_download', download.call_args.kwargs)
+            self.assertFalse(download.call_args.kwargs['force_download'])
 
     def test_manifest_requires_safe_paths_and_pinned_version(self):
         manifest = {
@@ -105,17 +105,17 @@ class DownloadTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'manifest.json'
-            script.write_json(path, manifest)
-            self.assertEqual(script.load_manifest(path), manifest)
+            hub.write_json(path, manifest)
+            self.assertEqual(hub.load_manifest(path, script.REPO_ID), manifest)
             for invalid in ('../outside', '/absolute', 'data/../../outside'):
                 manifest['files'][0]['path'] = invalid
                 path.write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
-                    script.load_manifest(path)
+                    hub.load_manifest(path, script.REPO_ID)
             manifest['revision'] = 'main'
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, 'commit SHA'):
-                script.load_manifest(path)
+                hub.load_manifest(path, script.REPO_ID)
 
 
 class RetryTests(unittest.TestCase):
@@ -123,17 +123,17 @@ class RetryTests(unittest.TestCase):
         response = httpx.Response(status, request=httpx.Request('GET', 'https://huggingface.co'))
         return httpx.HTTPStatusError('error', request=response.request, response=response)
 
-    @patch.object(script.time, 'sleep')
+    @patch.object(hub.time, 'sleep')
     def test_transient_failure_is_retried(self, sleep):
         operation = Mock(side_effect=[self.error(503), 'ok'])
-        self.assertEqual(script.retry(operation, 2), 'ok')
+        self.assertEqual(hub.retry(operation, 2), 'ok')
         self.assertEqual(operation.call_count, 2)
 
-    @patch.object(script.time, 'sleep')
+    @patch.object(hub.time, 'sleep')
     def test_authentication_failure_is_not_retried(self, sleep):
         operation = Mock(side_effect=self.error(401))
         with self.assertRaises(httpx.HTTPStatusError):
-            script.retry(operation, 3)
+            hub.retry(operation, 3)
         self.assertEqual(operation.call_count, 1)
         sleep.assert_not_called()
 

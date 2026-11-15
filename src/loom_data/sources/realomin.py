@@ -81,7 +81,7 @@ def iter_discover(source, instruction=None):
         raise ValueError(f'Expected a RealOmin data root: {source}')
     manifest_path = source / 'subset_manifest.json'
     if manifest_path.exists():
-        from loom_data.download.subset_common import load_manifest
+        from loom_data.download.hub import load_manifest
         manifest = load_manifest(manifest_path, REPO_ID)
         paths = iter(sorted(source / f['path'] for f in manifest['files'] if f['path'].endswith('.mcap')))
     else:
@@ -169,7 +169,6 @@ def convert_episode(source, destination, transform=None,
 
 class RealOmin(Source):
     name = 'realomin'
-    title = '10Kh-RealOmin-OpenData'
     policy = 'drop'
     OPTIONS = {
         'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),

@@ -5,6 +5,7 @@ import sys
 from loom_data.resumable import run_cli
 
 COMMANDS = {
+    'download': ('loom_data.download', 'download a small pinned subset of a source dataset'),
     'convert': ('loom_data.convert.job', 'convert a source dataset to the export contract'),
 }
 

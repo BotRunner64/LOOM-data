@@ -274,7 +274,6 @@ def discover_tasks(source):
 
 class Galaxea(Source):
     name = 'galaxea'
-    title = 'Galaxea-Open-World-Dataset'
     model = ''  # the parent of galaxea_r1lite/ and galaxea_r1pro/
     policy = 'skip'
     skip_reason = 'Galaxea chassis commands do not meet the stationary selection rule'

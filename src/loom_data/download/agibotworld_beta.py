@@ -1,24 +1,21 @@
-#!/usr/bin/env python3
 """Download a small, complete AgiBot World Beta subset from bounded TAR shards."""
-
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path, PurePosixPath
 import shutil
-import sys
 import tarfile
 
-from loom_data.download.subset_common import (
-    ENDPOINT, configure_hub, download_files, format_size, load_manifest,
-    positive_int, prepare_output, retry, safe_path, write_json,
+from loom_data import paths
+from loom_data.download.hub import (
+    ENDPOINT, download_files, format_size, load_manifest, positive_int, prepare_output, resolve_revision, retry,
+    safe_path, write_json,
 )
 
 REPO_ID = "agibot-world/AgiBotWorld-Beta"
-DEFAULT_MANIFEST = Path("dataset/manifests/agibotworld-beta-5.json")
-DEFAULT_OUTPUT = Path("dataset/raw/AgiBotWorld-Beta")
+MANIFEST = "agibotworld-beta-5.json"
+WORKERS = 2
 
 
 def state_members(archive: Path) -> dict[tuple[int, int], dict]:
@@ -80,7 +77,7 @@ def select(args) -> None:
     if args.manifest.exists():
         raise ValueError(f"Manifest already exists: {args.manifest}")
     api = HfApi(endpoint=ENDPOINT)
-    revision = retry(lambda: api.dataset_info(REPO_ID, revision=args.revision, expand=["sha"]).sha, args.retries)
+    revision = resolve_revision(api, REPO_ID, args.revision, args.retries)
 
     def tree(prefix: str) -> list[dict]:
         return [{"path": f.path, "size": f.size} for f in retry(lambda: list(api.list_repo_tree(
@@ -180,31 +177,14 @@ def download(args) -> None:
     print(f"Download complete: {len(manifest['episodes'])} episodes (HDF5 + all RGB videos + task annotations).", flush=True)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-    for name, function in (("select", select), ("download", download)):
-        command = commands.add_parser(name)
-        command.set_defaults(function=function)
-        command.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-        command.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-        command.add_argument("--retries", type=int, default=3)
-        if name == "select":
-            command.add_argument("--count", type=positive_int, default=5)
-            command.add_argument("--state-archive", help="Optional exact proprio_stats/*.tar path")
-            command.add_argument("--revision", default="main")
-            command.add_argument("--max-download-gib", type=float, default=4,
-                                 help="Budget for state and observation shards downloaded while selecting")
-        else:
-            command.add_argument("--workers", type=positive_int, default=2)
-    args = parser.parse_args()
-    if args.retries < 0:
-        parser.error("--retries must be nonnegative")
-    if getattr(args, "max_download_gib", 1) <= 0:
-        parser.error("--max-download-gib must be positive")
-    configure_hub()
-    args.function(args)
+def add_arguments(command, name) -> None:
+    if name == "select":
+        # Selection has to open the shards, so it downloads them into the output directory.
+        command.add_argument("--output-dir", type=Path, default=paths.RAW / "AgiBotWorld-Beta")
+        command.add_argument("--count", type=positive_int, default=5)
+        command.add_argument("--state-archive", help="exact proprio_stats/*.tar path (default: the smallest)")
+        command.add_argument("--max-download-gib", type=float, default=4,
+                             help="budget for the state and observation shards downloaded while selecting")
 
 
-if __name__ == "__main__":
-    main()
+COMMANDS = {"select": select, "download": download}
