@@ -21,6 +21,7 @@ from dataclasses import asdict, fields
 from itertools import islice
 from pathlib import Path
 
+from loom_data.contract import STATE_NAMES
 from loom_data.convert.parallel import (
     ROOT,
     StateError,
@@ -206,7 +207,7 @@ class Store:
             if (not isinstance(row, dict)
                     or set(row) != {'index', 'stream', 'start_ns', 'end_ns', 'reason'}
                     or row['index'] != task['index']
-                    or row['stream'] not in ('left_eef', 'right_eef', 'left_gripper', 'right_gripper')
+                    or row['stream'] not in STATE_NAMES
                     or row['reason'] not in ('boundary_idle', 'state_jump', 'internal_idle')
                     or type(row['start_ns']) is not int or type(row['end_ns']) is not int
                     or not 0 <= row['start_ns'] <= row['end_ns']):

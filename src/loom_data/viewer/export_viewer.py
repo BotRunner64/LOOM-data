@@ -18,7 +18,7 @@ import pyarrow.parquet as pq
 
 
 HERE = Path(__file__).resolve().parent
-STATE_NAMES = ('left_eef', 'right_eef', 'left_gripper', 'right_gripper')
+from loom_data.contract import STATE_NAMES
 CAMERA_ID = re.compile(r'^[a-z0-9_]+$')
 EPISODE_PAGE_SIZE = 100
 MAX_EPISODE_PAGE_SIZE = 200

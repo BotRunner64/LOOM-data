@@ -1,12 +1,9 @@
 """Local LeRobot v3 frame tables, episode metadata, and frame-accurate video cuts."""
-from fractions import Fraction
 import json
 import math
 from pathlib import Path
 
 import pyarrow.parquet as pq
-
-from loom_data.convert.export_common import configure_codec
 
 
 def source_path(shard, template, row, prefix, video_key=None):
@@ -100,47 +97,3 @@ class LeRobotV3Reader:
             raise ValueError(f'{path}: episode {index} range is outside its data file')
         rows = self.table.slice(start, row['length']).to_pydict()
         return rows
-
-
-def extract_video_segment(video, destination, expected_frames, fps):
-    """Decode from a preceding keyframe, select display frames, and encode H.264."""
-    import av
-
-    start, end = video['from_timestamp'], video['to_timestamp']
-    rate = Fraction(str(fps))
-    tolerance = min(1e-3, .01 / fps)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(video['path']) as reader, av.open(str(destination), 'w') as writer:
-        if len(reader.streams.video) != 1:
-            raise ValueError(f'{video["path"]}: expected one video stream')
-        source = reader.streams.video[0]
-        configure_codec(source.codec_context)
-        reader.seek(math.floor(start / source.time_base), stream=source, backward=True, any_frame=False)
-        encoder = writer.add_stream('libx264', rate=rate)
-        encoder.width, encoder.height = source.width, source.height
-        encoder.pix_fmt = 'yuv420p'
-        encoder.options = {'crf': '18', 'preset': 'fast'}
-        configure_codec(encoder.codec_context)
-        count = 0
-        for frame in reader.decode(source):
-            timestamp = frame.time
-            if timestamp is None:
-                raise ValueError(f'{video["path"]}: video frame has no timestamp')
-            if timestamp < start - tolerance:
-                continue
-            if timestamp >= end - tolerance:
-                break
-            if (frame.width, frame.height) != (encoder.width, encoder.height):
-                raise ValueError(f'{video["path"]}: video resolution changed')
-            # Reject missing/extra frames even when their total count happens to match.
-            if abs(timestamp - (start + count / fps)) > tolerance:
-                raise ValueError(f'{video["path"]}: noncontiguous video segment at frame {count}')
-            frame = frame.reformat(format='yuv420p')
-            frame.pts, frame.time_base = count, 1 / rate
-            for packet in encoder.encode(frame):
-                writer.mux(packet)
-            count += 1
-        if count != expected_frames:
-            raise ValueError(f'{video["path"]}: expected {expected_frames} frames, decoded {count}')
-        for packet in encoder.encode():
-            writer.mux(packet)

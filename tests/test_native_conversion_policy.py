@@ -13,7 +13,7 @@ import numpy as np
 
 from loom_data.convert import agibotworld_beta as beta, parallel, realomin
 from loom_data.convert.parallel_adapters import discover as discover_plan, make_config
-from loom_data.convert.source_policy import SourceDataError
+from loom_data.sources.policy import SourceDataError
 from test_convert_agibotworld_beta import make_source
 
 

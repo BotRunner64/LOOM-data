@@ -10,7 +10,8 @@ import re
 import tempfile
 
 from tqdm import tqdm
-from loom_data.convert.export_common import EXPORT_CONTRACT_VERSION, eef_offset as validate_eef_offset
+from loom_data.contract import VERSION as EXPORT_CONTRACT_VERSION
+from loom_data.geometry import eef_offset as validate_eef_offset
 
 from loom_data.paths import ROOT
 
@@ -325,7 +326,7 @@ class Adapter:
             return self.shard(task, pending, staging, store, failed)
         episode_id = pending[0]
         destination = staging / episode_id
-        from loom_data.convert.source_policy import SourceDataError
+        from loom_data.sources.policy import SourceDataError
         native_policy = self.config['params'].get('data_policy_version') == 1
         if native_policy and 'drop' in task:
             drop = task['drop']

@@ -14,7 +14,7 @@ import numpy as np
 
 from loom_data.check import anomaly_detection as detector
 from loom_data.check import parallel
-from loom_data.convert.export_common import write_state, write_video_index
+from loom_data.contract import write_state, write_video_index
 
 
 class ParallelDetectionTests(unittest.TestCase):

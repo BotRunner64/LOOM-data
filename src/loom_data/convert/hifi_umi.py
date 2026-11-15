@@ -11,12 +11,13 @@ import tempfile
 import numpy as np
 import pyarrow.parquet as pq
 
-from loom_data.convert.export_common import (
-    copy_h264_video, eef_offset as validate_eef_offset, seconds_to_ns, write_state, write_video_index,
-    task_instructions as instructions,
-)
+from loom_data.video import copy_h264_video
+from loom_data.geometry import eef_offset as validate_eef_offset
+from loom_data.contract import seconds_to_ns, write_state, write_video_index
+from loom_data.sources.common import task_instructions as instructions
 
-from loom_data.convert.lerobot_v3 import LeRobotV3Reader, extract_video_segment
+from loom_data.convert.lerobot_v3 import LeRobotV3Reader
+from loom_data.video import extract_video_segment
 
 from loom_data.paths import ROOT
 # Body-fixed virtual fingertip -> nominal rear/pivot datum, from the vendor's

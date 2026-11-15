@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-STATE_NAMES = ('left_eef', 'right_eef', 'left_gripper', 'right_gripper')
+from loom_data.contract import STATE_NAMES
 NS_PER_SECOND = 1_000_000_000
 
 

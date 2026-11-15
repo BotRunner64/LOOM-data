@@ -8,7 +8,7 @@ import sys
 from loom_data.paths import ROOT
 from loom_data.check.dataset_stats import discover_datasets
 
-STATE_NAMES = ('left_eef', 'right_eef', 'left_gripper', 'right_gripper')
+from loom_data.contract import STATE_NAMES
 REASONS = ('boundary_idle', 'internal_idle', 'state_jump')
 
 

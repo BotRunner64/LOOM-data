@@ -116,7 +116,7 @@ def validate_plan(plan):
         raise StateError('Unsupported or damaged plan')
     if plan.get('id') != digest({k: v for k, v in plan.items() if k != 'id'}):
         raise StateError('Plan checksum mismatch')
-    from loom_data.convert.export_common import EXPORT_CONTRACT_VERSION
+    from loom_data.contract import VERSION as EXPORT_CONTRACT_VERSION
     if plan.get('config', {}).get('params', {}).get('export_contract_version') != EXPORT_CONTRACT_VERSION:
         raise StateError('Incompatible export contract: old TCP plans require a new output and re-export')
     if plan.get('config', {}).get('storage_budget') is not None and not isinstance(plan.get('storage_sampling'), dict):
@@ -163,7 +163,7 @@ class Store:
         return cls(output, read_json(work_directory(output) / 'plan.json'))
 
     def state(self, episode_id, *, published=False):
-        from loom_data.convert.export_validation import file_sizes, validate_record
+        from loom_data.contract import file_sizes, validate_record
         if episode_id not in self.id_set:
             raise StateError(f'Unknown episode: {episode_id}')
         path = self.work / 'records' / f'{episode_id}.json'
@@ -282,7 +282,7 @@ class Store:
         return True
 
     def commit(self, episode_id, directory, manifest):
-        from loom_data.convert.export_validation import validate_episode
+        from loom_data.contract import validate_episode
         if self.state(episode_id) is not None:
             raise StateError(f'{episode_id}: already committed')
         if manifest.get('episode_id') != episode_id or directory.name != episode_id:

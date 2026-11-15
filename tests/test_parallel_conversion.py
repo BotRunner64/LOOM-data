@@ -20,7 +20,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from loom_data.convert import abc130k, agibotworld2026, export_common, parallel
+from loom_data import video as video_codecs
+from loom_data.convert import abc130k, agibotworld2026, parallel
 from loom_data.convert.parallel_adapters import Adapter, make_config
 from test_convert_hifi_umi import make_source as hifi_source, make_shard as hifi_shard
 from test_convert_molmoact2 import make_source as molmo_source, make_full_source as molmo_full_source
@@ -689,10 +690,10 @@ class SourceAdapterTests(unittest.TestCase):
 
     def test_serial_codec_configuration_applies_to_encoder_and_decoder(self):
         with patch.dict(os.environ, {'LOOM_DATA_SERIAL_CODECS': '1'}):
-            decoder = export_common.create_video_decoder('h264')
+            decoder = video_codecs.create_video_decoder('h264')
             self.assertEqual(decoder.thread_count, 1)
             encoder = av.CodecContext.create('libx264', 'w')
-            export_common.configure_codec(encoder)
+            video_codecs.configure_codec(encoder)
             self.assertEqual(encoder.thread_count, 1)
             self.assertIn('sync-lookahead=0', encoder.options['x264-params'])
 

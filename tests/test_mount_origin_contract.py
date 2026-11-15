@@ -9,7 +9,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from loom_data.convert import hifi_umi, parallel, realomin
-from loom_data.convert.export_validation import validate_episode
+from loom_data.contract import validate_episode
 from loom_data.convert.parallel_adapters import make_config
 from loom_data.robot.kinematics import rpy_matrix
 from test_convert_hifi_umi import make_source, make_shard
