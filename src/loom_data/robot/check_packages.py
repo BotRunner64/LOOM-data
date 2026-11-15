@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-MODELS = Path(__file__).resolve().parents[2] / "assets/robot_models"
+from loom_data.paths import MODELS
 
 
 def check_package(directory: Path, load: bool = False) -> dict:

@@ -28,7 +28,7 @@ def main():
     args = parser.parse_args()
     directory = args.model_dir
     if args.dataset:
-        models = Path(__file__).resolve().parents[2] / "assets/robot_models"
+        from loom_data.paths import MODELS as models
         catalog = json.loads((models / "catalog.json").read_text())["datasets"]
         if args.dataset not in catalog:
             parser.error(f"Unknown dataset; choose from {', '.join(catalog)}")

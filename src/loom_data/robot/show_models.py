@@ -28,7 +28,7 @@ from pathlib import Path
 import mujoco
 import mujoco.viewer
 
-MODELS = Path(__file__).resolve().parents[2] / "assets" / "robot_models"
+from loom_data.paths import MODELS
 ROBOTS = [("yam", 0.0), ("agibot_g2", 2.4), ("galaxea_r1lite", 4.8), ("galaxea_r1pro", 7.2)]
 
 
