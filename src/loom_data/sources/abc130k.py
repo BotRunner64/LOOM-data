@@ -13,8 +13,8 @@ from loom_data.robot.yam import YamFK
 
 from loom_data.sources.base import Source, task_limit
 
-CAMERAS = {f'/{name}-camera': name.replace('-', '_') for name in
-           ('top', 'top-left', 'top-right', 'left-wrist', 'right-wrist')}
+CAMERAS = {'/top-camera': 'top', '/top-left-camera': 'top',
+           '/left-wrist-camera': 'left_wrist', '/right-wrist-camera': 'right_wrist'}
 STATES = {f'/{side}-{kind}-state': f'{side}_{output}'
           for side in ('left', 'right')
           for kind, output in (('arm', 'eef'), ('ee', 'gripper'))}
@@ -51,6 +51,7 @@ def instructions(task, annotations, origin, end):
 def convert_episode(source, destination, fk):
     state = {name: ([], []) for name in STATES.values()}
     videos, tasks = {}, []
+    camera_topics = {}
     (destination / 'rgb').mkdir(parents=True)
     # Validate all state before expensive video transcoding. The second MCAP
     # pass only decodes camera topics; state samples retain their native times.
@@ -78,6 +79,8 @@ def convert_episode(source, destination, fk):
     with ExitStack() as stack:
         for topic, timestamp, decoded in messages(source / 'episode.mcap', list(CAMERAS)):
             camera = CAMERAS[topic]
+            if camera_topics.setdefault(camera, topic) != topic:
+                raise ValueError(f'{source}: multiple source topics for {camera}')
             if camera not in videos:
                 videos[camera] = VideoWriter(destination / 'rgb' / f'{camera}.mp4', decoded.format)
                 stack.callback(videos[camera].close)

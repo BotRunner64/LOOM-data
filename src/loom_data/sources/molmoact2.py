@@ -12,7 +12,7 @@ from loom_data.video import copy_h264_video
 from loom_data.contract import seconds_to_ns, write_state, write_video_index
 from loom_data.sources.common import task_instructions
 from loom_data.robot.yam import YamFK
-from loom_data.sources.lerobot_v3 import LeRobotV3Reader, subset_tasks
+from loom_data.sources.lerobot_v3 import LeRobotV3Reader, selected_cameras, subset_tasks, video_features
 from loom_data.video import extract_video_segment
 
 from loom_data.sources.base import Source, task_limit
@@ -32,8 +32,7 @@ def validate_source(info):
     state = features.get('observation.state', {})
     if state.get('shape') != [14] or state.get('names') != STATE_NAMES:
         raise ValueError('Unsupported MolmoAct2 observation.state layout')
-    if not all(features.get(key, {}).get('dtype') == 'video' for key in CAMERAS):
-        raise ValueError('Expected all three MolmoAct2 video features')
+    return video_features(CAMERAS, features)
 
 
 def load_tasks(directory):
@@ -92,34 +91,33 @@ def read_rows(source, metadata, rows, tasks, annotated, fk):
         raise ValueError(f'{source}: episode tasks disagree with task_index')
     annotation = ([{'start_ns': 0, 'end_ns': times[-1] - times[0], 'text': annotated[index]}]
                   if index in annotated else fallback)
-    if set(metadata.get('videos', {})) != set(CAMERAS):
-        raise ValueError(f'{source}: expected all three camera views')
+    cameras = selected_cameras(CAMERAS, metadata.get('videos'))
     streams = {}
     for side, offset in (('left', 0), ('right', 7)):
         streams[f'{side}_eef'] = [fk.pose(side, q) for q in state[:, offset:offset + 6]]
         streams[f'{side}_gripper'] = np.clip(state[:, offset + 6], 0, 1)
-    return times, streams, annotation
+    return times, streams, annotation, cameras
 
 
 def convert_episode(source, destination, tasks, annotated, fk):
-    times, streams, annotation = read_episode(source, tasks, annotated, fk)
-    return write_episode(source.name, destination, times, streams, annotation,
+    times, streams, annotation, cameras = read_episode(source, tasks, annotated, fk)
+    return write_episode(source.name, destination, times, streams, annotation, cameras,
                          lambda key, target: copy_h264_video(
                              source / 'videos' / f'{key}.mp4', target, len(times)))
 
 
-def write_episode(episode_id, destination, times, streams, annotation, video):
+def write_episode(episode_id, destination, times, streams, annotation, cameras, video):
     # This source supplies one shared timestamp per recorded observation row.
     # The segmented videos preserve that row order; container PTS are irrelevant.
     for name, values in streams.items():
         write_state(destination / 'state' / f'{name}.parquet', times, values, times[0],
                     pose=name.endswith('_eef'))
-    for key, camera in CAMERAS.items():
+    for key, camera in cameras.items():
         print(f'  {camera}', flush=True)
         target = destination / 'rgb' / camera
         video(key, target.with_suffix('.mp4'))
         write_video_index(target.with_suffix('.parquet'), times, times[0])
-    return {'episode_id': episode_id, 'cameras': sorted(CAMERAS.values()),
+    return {'episode_id': episode_id, 'cameras': sorted(cameras.values()),
             'instructions': annotation}
 
 
@@ -127,7 +125,7 @@ class DatasetReader(LeRobotV3Reader):
     def __init__(self, source):
         # Validate decoded segment lengths per episode: a bad source range must
         # not prevent preparing or converting the rest of the full dataset.
-        super().__init__(source, CAMERAS, COLUMNS, validate_source, check_video_length=False)
+        super().__init__(source, COLUMNS, validate_source, check_video_length=False)
         self.tasks, self.annotated = load_tasks(source / 'meta')
 
     def convert_episode(self, index, destination, fk):
@@ -138,8 +136,8 @@ class DatasetReader(LeRobotV3Reader):
                 raise ValueError(f'{self.source}: episode {index} {key} video range implies '
                                  f'{frames:g} frames; expected {row["length"]}')
         rows = self.read_rows(index)
-        times, streams, annotation = read_rows(self.source, row, rows, self.tasks, self.annotated, fk)
-        return write_episode(f'episode_{index:06d}', destination, times, streams, annotation,
+        times, streams, annotation, cameras = read_rows(self.source, row, rows, self.tasks, self.annotated, fk)
+        return write_episode(f'episode_{index:06d}', destination, times, streams, annotation, cameras,
                              lambda key, target: extract_video_segment(
                                  row['videos'][key], target, len(times), self.fps))
 

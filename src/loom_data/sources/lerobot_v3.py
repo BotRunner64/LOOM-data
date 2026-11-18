@@ -7,6 +7,23 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
+def selected_cameras(mapping, videos):
+    if not isinstance(videos, dict):
+        raise ValueError('Expected a mapping of source cameras')
+    selected = {key: name for key, name in mapping.items() if key in videos}
+    if not selected:
+        raise ValueError('No supported RGB cameras')
+    return selected
+
+
+def video_features(mapping, features):
+    cameras = selected_cameras(mapping, features)
+    for key in cameras:
+        if features[key].get('dtype') != 'video':
+            raise ValueError(f'Expected video feature: {key}')
+    return cameras
+
+
 def source_path(shard, template, row, prefix, video_key=None):
     indices = [row[f'{prefix}/{name}_index'] for name in ('chunk', 'file')]
     if any(type(i) is not int or i < 0 for i in indices):
@@ -20,12 +37,12 @@ def source_path(shard, template, row, prefix, video_key=None):
 class LeRobotV3Reader:
     """Keep metadata and at most one projected frame table for the current shard."""
 
-    def __init__(self, source, cameras, columns, validate, *, check_video_length=True):
+    def __init__(self, source, columns, validate, *, check_video_length=True):
         self.columns = list(columns)
         self.source = source
         meta = source / 'meta'
         self.info = json.loads((meta / 'info.json').read_text(encoding='utf-8'))
-        validate(self.info)
+        cameras = validate(self.info)
         self.fps = self.info.get('fps')
         if not isinstance(self.fps, (float, int)) or not math.isfinite(self.fps) or self.fps <= 0:
             raise ValueError(f'{source}: invalid FPS')
@@ -34,12 +51,19 @@ class LeRobotV3Reader:
             raise ValueError(f'{source}: no episode metadata parquet files')
         columns = ['episode_index', 'length', 'dataset_from_index', 'dataset_to_index', 'tasks',
                    'data/chunk_index', 'data/file_index']
-        columns += [f'videos/{key}/{field}' for key in cameras for field in
-                    ('chunk_index', 'file_index', 'from_timestamp', 'to_timestamp')]
+        video_columns = {key: [f'videos/{key}/{field}' for field in
+                               ('chunk_index', 'file_index', 'from_timestamp', 'to_timestamp')]
+                         for key in cameras}
         self.episodes = {}
         self.paths = {}
         for path in self.metadata_files:
-            for row in pq.read_table(path, columns=columns).to_pylist():
+            table = pq.ParquetFile(path)
+            names = set(table.schema_arrow.names)
+            part_cameras = [key for key, fields in video_columns.items() if names.intersection(fields)]
+            if any(not names.issuperset(video_columns[key]) for key in part_cameras):
+                raise ValueError(f'{path}: incomplete video range columns')
+            selected = columns + [field for key in part_cameras for field in video_columns[key]]
+            for row in table.read(columns=selected).to_pylist():
                 index, length = row['episode_index'], row['length']
                 start, stop = row['dataset_from_index'], row['dataset_to_index']
                 if (type(index) is not int or index < 0 or index in self.episodes
@@ -48,9 +72,11 @@ class LeRobotV3Reader:
                         or start < 0 or stop - start != length):
                     raise ValueError(f'{path}: invalid/duplicate episode identity or length')
                 videos = {}
-                for key in cameras:
+                for key in part_cameras:
                     prefix = f'videos/{key}'
                     begin, end = row[f'{prefix}/from_timestamp'], row[f'{prefix}/to_timestamp']
+                    if all(row[field] is None for field in video_columns[key]):
+                        continue
                     if (not isinstance(begin, (int, float)) or not isinstance(end, (int, float))
                             or not math.isfinite(begin) or not math.isfinite(end) or begin < 0
                             or end <= begin

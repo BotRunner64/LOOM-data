@@ -180,7 +180,8 @@ episode ID 为 `task_<task_id>_episode_<episode_id>`。
 
 HDF5 的整数纳秒 `timestamp` 用作四路 state 与各路 RGB 的采集时刻，不按 MP4 PTS 或 FPS 重建。
 源法兰已包含腰部运动，转换只组合实测底盘位姿及固定工具变换，不依赖机器人模型资产。
-原 MP4 完整解码再写 H.264，不保留音轨，帧数必须与 HDF5 行数相同。
+只选 `head_color`、`hand_left_color`、`hand_right_color`，分别映射为 `top`、`left_wrist`、`right_wrist`。
+入选的 MP4 完整解码再写 H.264，不保留音轨，帧数必须与 HDF5 行数相同。
 `action_config` 的指令帧区间映射到同一原始 clock；缺口使用整集任务文本。
 
 ### 数据 drop

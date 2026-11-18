@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 from support import MODELS
 from loom_data.sources.agibotworld2026 import (
     G2FK, STATE_FIELDS, pose_matrix,
-    camera_id, instructions, openness, read_episode, seconds_to_ns, source_fields,
+    instructions, openness, read_episode, seconds_to_ns, source_fields,
     verify_stationary_base,
 )
 
@@ -46,13 +46,14 @@ class AgibotWorld2026MappingTests(unittest.TestCase):
             offset += length
         info = {'robot_type': 'g2a', 'features': {
             'observation.state': {'field_descriptions': fields},
+            'observation.images.fisheye': {'video_info': {'video.is_depth_map': False}},
+            'observation.images.top_head': {'video_info': {'video.is_depth_map': True}},
             'observation.images.head_depth': {'video_info': {'video.is_depth_map': True}},
             'observation.images.hand_left': {'video_info': {'video.is_depth_map': False}},
         }}
         indices, cameras = source_fields(info)
         self.assertEqual(indices['state/robot/position'], [])
-        self.assertEqual(cameras, {'observation.images.hand_left': 'hand_left'})
-        self.assertEqual(camera_id('observation.images.hand_left'), 'hand_left')
+        self.assertEqual(cameras, {'observation.images.hand_left': 'left_wrist'})
 
     def test_instruction_segments_use_sample_times_and_fill_gaps(self):
         info = {'instruction_segments': {'3': [

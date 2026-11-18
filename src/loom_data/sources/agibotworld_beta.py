@@ -19,10 +19,9 @@ from loom_data.sources.policy import SourceDataError, source_value, stationary_b
 from loom_data.sources.base import Source, task_limit
 
 REPO_ID = 'agibot-world/AgiBotWorld-Beta'
-CAMERAS = {f'{name}_color.mp4': name for name in (
-    'head', 'hand_left', 'hand_right', 'head_center_fisheye', 'head_left_fisheye',
-    'head_right_fisheye', 'back_left_fisheye', 'back_right_fisheye',
-)}
+CAMERAS = {'head_color.mp4': 'top',
+           'hand_left_color.mp4': 'left_wrist',
+           'hand_right_color.mp4': 'right_wrist'}
 # Recorded flange origin is the gripper mounting datum; keep the tool axes.
 DEFAULT_EEF_OFFSET = (0., 0., 0.)
 # G1_120s installs its right gripper with a pi rotation about source flange Z.
@@ -108,11 +107,9 @@ def iter_discover(source):
         reasons, details = [], []
         if not state.is_file():
             reasons.append('missing_state'); details.append(f'Missing state: {state}')
-        paths = sorted(video_dir.glob('*.mp4'))
-        if not paths:
+        videos = {CAMERAS[p.name]: p for p in video_dir.glob('*.mp4') if p.name in CAMERAS}
+        if not videos:
             reasons.append('missing_rgb'); details.append(f'Missing RGB: {video_dir}')
-        elif any(p.name not in CAMERAS for p in paths):
-            reasons.append('unknown_camera'); details.append(f'Unknown camera filename: {video_dir}')
         annotation = annotations.get(episode)
         if annotation_error is not None:
             reasons.append(annotation_error.reason); details.append(str(annotation_error))
@@ -120,7 +117,7 @@ def iter_discover(source):
             reasons.append('missing_annotation'); details.append(f'Missing episode annotation: {task}/{episode}')
         elif 'drop' in annotation:
             reasons.append(annotation['drop']['reason']); details.append(annotation['drop']['detail'])
-        item = {'state': state, 'videos': {CAMERAS[p.name]: p for p in paths if p.name in CAMERAS},
+        item = {'state': state, 'videos': videos,
                 'annotation_path': source / f'task_info/task_{task}.json', 'episode_index': episode}
         if reasons:
             item['drop'] = {'reason': reasons[0], 'reasons': reasons, 'detail': '; '.join(details)}

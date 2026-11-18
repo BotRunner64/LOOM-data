@@ -107,6 +107,7 @@ class BetaExportTests(unittest.TestCase):
     def test_real_media_schema_video_count_and_precision(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);make_source(root/'raw')
+            (root/'raw/observations/694/123/videos/back_left_fisheye_color.mp4').write_bytes(b'unused')
             convert('agibotworld_beta', root/'raw',root/'out')
             record=json.loads((root/'out/episodes.jsonl').read_text())
             destination=root/'out/episodes'/record['episode_id']
@@ -114,7 +115,7 @@ class BetaExportTests(unittest.TestCase):
             for side in ('left', 'right'):
                 values = pq.read_table(destination / 'state' / f'{side}_eef.parquet')['pose'].to_pylist()
                 np.testing.assert_allclose(np.array(values)[:, :3], [[1., 2., 0.]] * 3)
-            for kind in ('state/left_eef','rgb/head'):
+            for kind in ('state/left_eef','rgb/top'):
                 self.assertEqual(pq.read_table(destination/f'{kind}.parquet')['timestamp_ns'].to_pylist(),[0,31_234_567,68_765_432])
             self.assertEqual(pq.read_table(destination/'state/left_gripper.parquet')['openness'].to_pylist(),[1.,.5,0.])
             self.assertEqual(record['instructions'][0]['end_ns'],31_234_567)

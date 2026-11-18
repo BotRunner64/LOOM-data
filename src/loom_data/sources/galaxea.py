@@ -16,9 +16,9 @@ from loom_data.robot.urdf_model import Robot, parse_urdf
 from loom_data.sources.base import Source, task_limit
 
 SIDES = ('left', 'right')
-CAMERAS = {f'observation.images.{name}_rgb': name for name in (
-    'head', 'head_right', 'left_wrist', 'right_wrist',
-)}
+CAMERAS = {'observation.images.head_rgb': 'top',
+           'observation.images.left_wrist_rgb': 'left_wrist',
+           'observation.images.right_wrist_rgb': 'right_wrist'}
 # Mount datum is arm_link6 (Lite) / arm_link7 (Pro). The Pro native
 # gripper_base_link is translated [-0.0295, 0, -0.16065] from its mount,
 # with identical axes; invert that fixed translation to recover the mount.
@@ -60,12 +60,12 @@ def validate_source(info):
             raise ValueError(f'{robot_type}: unexpected dimensions for {key}, expected {shape}')
     cameras = {}
     for key, feature in features.items():
-        if not key.startswith('observation.images.'):
+        if key not in CAMERAS:
             continue
         video_info = feature.get('info', feature.get('video_info', {}))
         if video_info.get('video.is_depth_map', False):
             continue
-        if key not in CAMERAS or feature.get('dtype') != 'video':
+        if feature.get('dtype') != 'video':
             raise ValueError(f'Unsupported RGB camera feature: {key}')
         cameras[key] = CAMERAS[key]
     if not cameras:

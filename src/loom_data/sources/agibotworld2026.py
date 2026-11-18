@@ -26,19 +26,12 @@ STATE_FIELDS = ('state/left_effector/position', 'state/right_effector/position',
                 'state/robot/position', 'state/robot/orientation')
 # Recorded flange origin is the gripper mounting datum; keep the tool axes.
 DEFAULT_EEF_OFFSET = (0., 0., 0.)
-CAMERA_PREFIX = 'observation.images.'
+CAMERAS = {'observation.images.top_head': 'top',
+           'observation.images.hand_left': 'left_wrist',
+           'observation.images.hand_right': 'right_wrist'}
 ARCHIVE_NAME = re.compile(r'^(\d+)_(\d+)\.tar\.gz$')
 PARQUET_NAME = re.compile(r'^data/data/chunk-\d+/(episode_\d+)\.parquet$')
 VIDEO_NAME = re.compile(r'^data/videos/chunk-\d+/(observation\.images\.[^/]+)/(episode_\d+)\.mp4$')
-
-
-def camera_id(key):
-    if not key.startswith(CAMERA_PREFIX):
-        raise ValueError(f'Invalid camera key: {key}')
-    name = key[len(CAMERA_PREFIX):]
-    if not re.fullmatch(r'[a-z0-9_]+', name):
-        raise ValueError(f'Invalid camera identifier: {key}')
-    return name
 
 
 def source_fields(info):
@@ -54,10 +47,10 @@ def source_fields(info):
             raise ValueError(f'Unexpected source dimensions for {key}')
     if bool(indices['state/robot/position']) != bool(indices['state/robot/orientation']):
         raise ValueError('Robot position and orientation must be present together')
-    cameras = {key: camera_id(key) for key, feature in features.items()
-               if key.startswith(CAMERA_PREFIX) and not feature.get('video_info', {}).get('video.is_depth_map', False)}
-    if not cameras or len(set(cameras.values())) != len(cameras):
-        raise ValueError('Expected unique RGB camera IDs')
+    cameras = {key: CAMERAS[key] for key, feature in features.items() if key in CAMERAS
+               and not feature.get('video_info', {}).get('video.is_depth_map', False)}
+    if not cameras:
+        raise ValueError('No supported RGB cameras in source metadata')
     return indices, cameras
 
 

@@ -60,10 +60,13 @@ class ExportTests(unittest.TestCase):
                         value = positions if 'arm' in topic else [[-.002], [1.00232], [.5]][i]
                         records.append((topic, timestamp, SimpleNamespace(position=value)))
                 for timestamp, packet in zip([100, 140, 180], packets):
-                    records.append(('/top-camera', timestamp, SimpleNamespace(data=bytes(packet), format=codec)))
+                    topic = '/top-left-camera' if codec == 'h265' else '/top-camera'
+                    records.append((topic, timestamp, SimpleNamespace(data=bytes(packet), format=codec)))
+                records.append(('/top-right-camera', 1, SimpleNamespace(data=b'unused', format=codec)))
                 with patch.object(script, 'messages', side_effect=lambda path, topics: (
                         r for r in sorted(records, key=lambda r: r[1]) if r[0] in topics)):
                     metadata = script.convert_episode(root / 'episode_1', root / 'out', script.YamFK(MODEL))
+                self.assertEqual(metadata['cameras'], ['top'])
                 self.assertEqual(metadata['instructions'], [{'start_ns': 0, 'end_ns': 100, 'text': 'pick'}])
                 index_table = pq.read_table(root / 'out/rgb/top.parquet')
                 self.assertEqual(index_table['timestamp_ns'].to_pylist(), [0, 40, 80])

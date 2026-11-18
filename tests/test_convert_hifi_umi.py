@@ -130,6 +130,38 @@ def make_shard(root, chunk=0, part=0, video_frames=8):
 
 
 class HifiUmiTests(unittest.TestCase):
+    def test_subset_with_one_wrist_and_auxiliary_view(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            episode = make_source(root / 'raw')
+            metadata = episode / 'episode.json'
+            row = json.loads(metadata.read_text())
+            row['videos'] = {'observation.images.right_hand_up': {},
+                             'observation.images.right_hand_down': {}}
+            metadata.write_text(json.dumps(row))
+            convert('hifi_umi', root / 'raw', root / 'out')
+            record = json.loads((root / 'out/episodes.jsonl').read_text())
+            self.assertEqual(record['cameras'], ['right_wrist'])
+            files = (root / 'out/episodes' / episode.name / 'rgb').iterdir()
+            self.assertEqual({file.name for file in files}, {'right_wrist.mp4', 'right_wrist.parquet'})
+
+            del row['videos']['observation.images.right_hand_up']
+            metadata.write_text(json.dumps(row))
+            assert_conversion_fails(self, 'No supported RGB cameras', 'hifi_umi', root / 'raw', root / 'empty')
+
+    def test_full_shard_with_different_camera_sets_per_episode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shard = make_shard(root / 'raw')
+            metadata = shard / 'meta/episodes/chunk-001/file-000.parquet'
+            table = pq.read_table(metadata)
+            omit = [name for name in table.column_names if name.startswith('videos/observation.images.head_main/')]
+            pq.write_table(table.drop(omit), metadata)
+            convert('hifi_umi', root / 'raw', root / 'out')
+            records = [json.loads(line) for line in (root / 'out/episodes.jsonl').read_text().splitlines()]
+            self.assertEqual([r['cameras'] for r in records], [
+                ['left_wrist', 'right_wrist', 'top'], ['left_wrist', 'right_wrist']])
+
     def test_full_shards_cut_nonkeyframe_boundaries_and_keep_unique_ids(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -132,12 +132,12 @@ R_world_mount = R_world_raw
 `--input-dir` 可以指向包含 `chunk-XXXX/part-YYYY/` 的完整下载根目录，也可以指向
 其中一个 `part-YYYY/`，或包含 `source/` 元数据与 `episodes/` 的子集目录。不直接读取远端数据。
 完整分片读取各自的 `meta/info.json`、`meta/modality.json`、`meta/tasks.parquet` 和
-`meta/episodes/**/*.parquet`，按元数据中的文件索引与数据范围读取逐帧表，并按六路
+`meta/episodes/**/*.parquet`，按元数据中的文件索引与数据范围读取逐帧表，并按所选
 视频各自的 `[from_timestamp, to_timestamp)` 截取拼接视频。从前一个关键帧开始解码，
 仅保留当前 episode 的显示帧，重新编码为 H.264（CRF 18、fast），校验时间区间与帧数。
 MP4 播放时间从零开始，输出 Parquet 时间戳仍来自原生 `timestamp`，不从视频 FPS 推算。
 完整数据输出 ID 为 `chunk_XXXX_part_YYYY_episode_NNNNNN`，避免分片内重复编号；子集沿用 `episode_NNNNNN`。
-完整数据按 shard 分配 worker：每个 worker 只缓存当前 shard 的一个数据文件所需列，六路视频逐路处理。
+完整数据按 shard 分配 worker：每个 worker 只缓存当前 shard 的一个数据文件所需列，所选视频逐路处理。
 
 ### 位姿和夹爪
 
@@ -160,7 +160,7 @@ MP4 播放时间从零开始，输出 Parquet 时间戳仍来自原生 `timestam
 - 使用 `round(float(timestamp) * 1e9)` 转为 int64 纳秒；保留源 float32 的精度及
   间隔，不根据 FPS 或行号重新生成时间。全部流统一减去首行时间。
 - 输出四张独立 state 表。源发布本身是同步行格式，转换不会虚构异步采样时刻。
-- 相机 ID 为去掉 `observation.images.` 后的固定名称。每个视频必须是仅含一个
+- 头部主相机 `head_main` 映射为 `top`，`left_hand_up`、`right_hand_up` 分别映射为 `left_wrist`、`right_wrist`。子集布局中，每个入选视频必须是仅含一个
   H.264 视频流的 MP4；逐帧解码验证显示帧数和分辨率后逐字节复制，不再次有损编码。
   帧索引为 `0..N-1`，其时间来自源表；视频容器 PTS 不参与采样时刻计算。
 - 按逐行 `task_index` 的变化生成指令区间。第一条从共同零点开始，末段终点为最后
@@ -168,7 +168,6 @@ MP4 播放时间从零开始，输出 Parquet 时间戳仍来自原生 `timestam
 
 ### 校验
 
-检查源 embodiment/布局、episode 身份和长度、连续帧号/全局行号、任务映射、全部
-六路相机和视频帧数。空轨迹、零时长、时间倒退、缺失文件、非有限值、无效旋转均报错。
+检查源 embodiment/布局、episode 身份和长度、连续帧号/全局行号、任务映射、入选相机的视频帧数。空轨迹、零时长、时间倒退、缺失文件、非有限值、无效旋转均报错。
 任何 `observation.state_valid` 或 `valid.frame` 非 true 的 episode 都拒绝转换（记为失败）；当前实现
 不删除、补齐或插值这些样本，避免丢弃有效性标记后将前值填充/黑帧误作正常观测。

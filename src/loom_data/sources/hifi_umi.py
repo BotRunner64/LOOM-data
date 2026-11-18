@@ -15,7 +15,7 @@ from loom_data.geometry import eef_offset as validate_eef_offset
 from loom_data.contract import seconds_to_ns, write_state, write_video_index
 from loom_data.sources.common import task_instructions as instructions
 
-from loom_data.sources.lerobot_v3 import LeRobotV3Reader, subset_tasks
+from loom_data.sources.lerobot_v3 import LeRobotV3Reader, selected_cameras, subset_tasks, video_features
 from loom_data.video import extract_video_segment
 
 from loom_data.sources.base import Source, task_limit
@@ -26,10 +26,9 @@ from loom_data.sources.base import Source, task_limit
 DEFAULT_EEF_OFFSET = (-0.12, 0., 0.)
 # Dataset convention: the stored angle is the single-finger angle, not doubled.
 DEFAULT_GRIPPER_OPEN_RAD = float(np.deg2rad(35.))
-CAMERAS = {f'observation.images.{name}': name for name in (
-    'head_main', 'head_main_stereo_right', 'left_hand_up', 'left_hand_down',
-    'right_hand_up', 'right_hand_down',
-)}
+CAMERAS = {'observation.images.head_main': 'top',
+           'observation.images.left_hand_up': 'left_wrist',
+           'observation.images.right_hand_up': 'right_wrist'}
 COLUMNS = ('observation.state', 'observation.state_valid', 'timestamp',
            'frame_index', 'episode_index', 'index', 'task_index', 'valid.frame')
 
@@ -48,8 +47,6 @@ def validate_source(info, modality):
     features = info.get('features', {})
     if features.get('observation.state', {}).get('shape') != [20]:
         raise ValueError('Expected a 20-dimensional observation.state')
-    if not all(features.get(key, {}).get('dtype') == 'video' for key in CAMERAS):
-        raise ValueError('Expected all six HiFi-UMI video features')
     for side, offset in (('right', 0), ('left', 10)):
         for kind, start, end in (('pose', offset, offset + 9),
                                  ('gripper', offset + 9, offset + 10)):
@@ -61,6 +58,7 @@ def validate_source(info, modality):
                             else {'unit': 'rad'})
             if any(field.get(key) != value for key, value in expected.items()):
                 raise ValueError(f'Unsupported modality for {side} {kind}')
+    return video_features(CAMERAS, features)
 
 
 def mounting_offsets(left_eef_offset, right_eef_offset):
@@ -151,32 +149,31 @@ def read_rows(source, metadata, rows, tasks, closed_rad, open_rad, eef_offsets=N
     annotation = instructions(rows['task_index'], tasks, times)
     if set(metadata.get('tasks', [])) != {tasks[i] for i in rows['task_index']}:
         raise ValueError(f'{source}: episode tasks disagree with task_index')
-    if set(metadata.get('videos', {})) != set(CAMERAS):
-        raise ValueError(f'{source}: expected all six camera views')
+    cameras = selected_cameras(CAMERAS, metadata.get('videos'))
     streams = {}
     for side, offset in (('right', 0), ('left', 10)):
         streams[f'{side}_eef'] = poses_from_rows(state[:, offset:offset + 9], offsets[side])
         streams[f'{side}_gripper'] = openness(state[:, offset + 9], closed_rad, open_rad)
-    return times, streams, annotation
+    return times, streams, annotation, cameras
 
 
 def convert_episode(source, destination, tasks, closed_rad, open_rad, eef_offsets=None):
-    times, streams, annotation = read_episode(source, tasks, closed_rad, open_rad, eef_offsets)
-    return write_episode(source.name, destination, times, streams, annotation,
+    times, streams, annotation, cameras = read_episode(source, tasks, closed_rad, open_rad, eef_offsets)
+    return write_episode(source.name, destination, times, streams, annotation, cameras,
                          lambda key, target: copy_h264_video(
                              source / 'videos' / f'{key}.mp4', target, len(times)))
 
 
-def write_episode(episode_id, destination, times, streams, annotation, video):
+def write_episode(episode_id, destination, times, streams, annotation, cameras, video):
     for name, values in streams.items():
         write_state(destination / 'state' / f'{name}.parquet', times, values, times[0],
                     pose=name.endswith('_eef'))
-    for key, camera in CAMERAS.items():
+    for key, camera in cameras.items():
         print(f'  {camera}', flush=True)
         target = destination / 'rgb' / camera
         video(key, target.with_suffix('.mp4'))
         write_video_index(target.with_suffix('.parquet'), times, times[0])
-    return {'episode_id': episode_id, 'cameras': sorted(CAMERAS.values()),
+    return {'episode_id': episode_id, 'cameras': sorted(cameras.values()),
             'instructions': annotation}
 
 
@@ -200,7 +197,7 @@ def shard_episode_id(shard, index):
 
 class ShardReader(LeRobotV3Reader):
     def __init__(self, source):
-        super().__init__(source, CAMERAS, COLUMNS,
+        super().__init__(source, COLUMNS,
                          lambda info: validate_source(info, json.loads(
                              (source / 'meta/modality.json').read_text(encoding='utf-8'))))
         self.tasks = load_tasks(source / 'meta/tasks.parquet')
@@ -208,9 +205,9 @@ class ShardReader(LeRobotV3Reader):
     def convert_episode(self, index, destination, closed_rad, open_rad, eef_offsets=None):
         row = self.episodes[index]
         rows = self.read_rows(index)
-        times, streams, annotation = read_rows(self.source, row, rows, self.tasks, closed_rad, open_rad, eef_offsets)
+        times, streams, annotation, cameras = read_rows(self.source, row, rows, self.tasks, closed_rad, open_rad, eef_offsets)
         episode_id = shard_episode_id(self.source, index)
-        return write_episode(episode_id, destination, times, streams, annotation,
+        return write_episode(episode_id, destination, times, streams, annotation, cameras,
                              lambda key, target: extract_video_segment(
                                  row['videos'][key], target, len(times), self.fps))
 

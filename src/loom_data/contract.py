@@ -13,15 +13,15 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# Recorded in resume plans so older TCP-origin exports cannot be resumed as mount poses.
-VERSION = 2
+# Recorded in resume plans to prevent mixing incompatible exports.
+VERSION = 3
 
 MANIFEST = 'episodes.jsonl'
 EPISODES = 'episodes'
 SIDES = ('left', 'right')
 STATE_NAMES = ('left_eef', 'right_eef', 'left_gripper', 'right_gripper')
 EPISODE_ID = re.compile(r'[A-Za-z0-9_-]+')
-CAMERA_ID = re.compile(r'[a-z0-9_]+')
+CAMERA_IDS = ('left_wrist', 'right_wrist', 'top')
 
 POSE = pa.list_(pa.float64(), 12)
 OPENNESS = pa.float32()
@@ -112,7 +112,7 @@ def validate_record(record, episode_id):
         raise ValueError(f'{episode_id}: invalid manifest identity')
     cameras = record.get('cameras')
     if (not isinstance(cameras, list) or not cameras
-            or any(not isinstance(c, str) or not CAMERA_ID.fullmatch(c) for c in cameras)
+            or any(not isinstance(c, str) or c not in CAMERA_IDS for c in cameras)
             or len(set(cameras)) != len(cameras)):
         raise ValueError(f'{episode_id}: invalid cameras')
     instructions = record.get('instructions')

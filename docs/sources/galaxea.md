@@ -70,7 +70,7 @@ loom-data convert run --dataset galaxea --workers 8
 
 源 LeRobot 已将状态与图像对齐到逐帧表。本地只有这一列共同时间戳，没有原始 ROS 各 topic 的独立采样时间。转换保留此发布格式的时间戳及全部样本，不能由此恢复原始异步采集时间；不按帧号、15 FPS 或视频 PTS 重造时间。
 
-相机为 `head_rgb`、`head_right_rgb`、`left_wrist_rgb`、`right_wrist_rgb`，每集各自一个 MP4；本地为 AV1、15 FPS。每路显示顺序的帧数应与逐帧表相等。头部双目左右图像分别保存。
+相机为 `head_rgb`、`head_right_rgb`、`left_wrist_rgb`、`right_wrist_rgb`，每集各自一个 MP4；本地为 AV1、15 FPS。每路显示顺序的帧数应与逐帧表相等。源文件分别存放头部双目的左右图像。
 
 ### 原生末端参考系
 
@@ -149,6 +149,6 @@ R1 Lite 的原生 ee_pose 已在安装法兰。R1 Pro 原生 ee_pose 位于 `gri
 - 保留源逐帧 `timestamp`，秒乘 `1e9` 后取整，所有 state 和 RGB 共享首样本原点，不由 FPS 推算时间。
 - 实测原生末端位姿左乘躯干 FK，再右乘固定工具变换，输出底盘系下夹爪安装接口的位置和完整 3×3 旋转矩阵（按列展平）。底盘只作为筛选后假定固定的参考系，不导出底盘或 action。
 - G1 夹爪 `openness = clip(stroke_mm / 100, 0, 1)`；非有限值报错。
-- 四路 RGB 逐帧转为无音轨 H.264，逐路检查解码帧数，索引保存源时间；视频容器使用 30 FPS，不代表采集频率。相机 ID 为 `head`、`head_right`、`left_wrist`、`right_wrist`。
+- 选取 `head_rgb`、`left_wrist_rgb`、`right_wrist_rgb`，分别映射为 `top`、`left_wrist`、`right_wrist`。入选的 RGB 逐帧转为无音轨 H.264，逐路检查解码帧数，索引保存源时间；视频容器使用 30 FPS，不代表采集频率。
 - 指令按逐帧细粒度标签生成区间，缺失时回退到整体任务；不使用质量标签。重复时间戳的零长度区间不写入，保留该时刻最后生效的标签。
 - episode ID 为 `<task_directory>_episode_<index:06d>`，避免不同任务的编号冲突。

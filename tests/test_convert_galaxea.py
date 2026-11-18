@@ -44,7 +44,8 @@ class GalaxeaMappingTests(unittest.TestCase):
     def test_embodiment_and_component_order_are_checked(self):
         for kind in DEFAULT_EEF_OFFSETS:
             info = source_info(kind)
-            self.assertEqual(validate_source(info), (kind, {'observation.images.head_rgb': 'head'}))
+            info['features']['observation.images.head_right_rgb'] = {'dtype': 'video'}
+            self.assertEqual(validate_source(info), (kind, {'observation.images.head_rgb': 'top'}))
             info['features']['observation.state.left_arm']['shape'] = [8]
             with self.assertRaisesRegex(ValueError, 'dimensions'):
                 validate_source(info)
@@ -228,9 +229,9 @@ class GalaxeaExportTests(unittest.TestCase):
                 grip = pq.read_table(directory/'state'/f'{side}_gripper.parquet')
                 self.assertEqual(grip['openness'].to_pylist(), [0., .5, 1.])
                 self.assertEqual(grip.schema.field('openness').type, pa.float32())
-            index = pq.read_table(directory/'rgb/head.parquet').to_pydict()
+            index = pq.read_table(directory/'rgb/top.parquet').to_pydict()
             self.assertEqual(index, {'frame_index': [0,1,2], 'timestamp_ns': [0,40000000,110000000]})
-            with av.open(str(directory/'rgb/head.mp4')) as reader:
+            with av.open(str(directory/'rgb/top.mp4')) as reader:
                 self.assertEqual(len(reader.streams), 1)
                 self.assertEqual(reader.streams.video[0].codec_context.name, 'h264')
                 frames = list(reader.decode(video=0))

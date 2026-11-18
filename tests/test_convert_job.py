@@ -21,7 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import support
-from loom_data import paths, resumable
+from loom_data import contract, paths, resumable
 from loom_data import video as video_codecs
 from loom_data.convert import job as parallel
 from loom_data.sources import abc130k, agibotworld2026
@@ -31,6 +31,16 @@ from loom_data.convert.config import make_config
 from test_convert_hifi_umi import make_source as hifi_source, make_shard as hifi_shard
 from test_convert_molmoact2 import make_source as molmo_source, make_full_source as molmo_full_source
 import test_convert_galaxea as galaxea_tests
+
+
+class CameraContractTests(unittest.TestCase):
+    def test_manifest_requires_distinct_canonical_views(self):
+        record = {'episode_id': 'ep', 'instructions': [{'start_ns': 0, 'end_ns': 1, 'text': 'pick'}]}
+        for cameras in (['top'], ['right_wrist', 'left_wrist'], ['top', 'left_wrist', 'right_wrist']):
+            contract.validate_record(dict(record, cameras=cameras), 'ep')
+        for cameras in ([], ['head'], ['top', 'top'], ['top', 'top_right']):
+            with self.subTest(cameras=cameras), self.assertRaisesRegex(ValueError, 'invalid cameras'):
+                contract.validate_record(dict(record, cameras=cameras), 'ep')
 
 
 class InputStampTests(unittest.TestCase):

@@ -94,7 +94,7 @@ class RealOminTests(unittest.TestCase):
             source.parent.mkdir(parents=True)
             source.touch()
             with patch.object(script, 'messages', side_effect=lambda path, video=False: iter(
-                    row for row in records if bool(script.CAMERA.fullmatch(row[0])) == video)):
+                    row for row in records if row[0] in (script.CAMERAS if video else script.STATES))):
                 direct = script.convert_episode({'path': source, 'instruction': 'clean bowl'}, root / 'direct')
                 convert('realomin', root / 'raw', root / 'serial')
                 config = make_config('realomin', root / 'raw')
@@ -140,7 +140,7 @@ class RealOminTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / 'episode_test'
             def messages(path, *, video=False):
-                return iter(r for r in records if bool(script.CAMERA.fullmatch(r[0])) == video)
+                return iter(r for r in records if r[0] in (script.CAMERAS if video else script.STATES))
             transform = tool_transform([.1, 0, 0], [0, 0, 0])
             with patch.object(script, 'messages', side_effect=messages):
                 record = script.convert_episode({'path': Path('sample.mcap'), 'instruction': 'clean bowl'}, destination, transform)
@@ -223,7 +223,7 @@ class RealOminTests(unittest.TestCase):
             config = make_config('realomin',root/'raw',eef_offset=[.2,0,0],tool_rpy=[0,0,0],instruction='Clean')
             parallel.prepare(config,root/'out')
             with patch.object(script,'messages',side_effect=lambda path,video=False: iter(
-                    r for r in records if bool(script.CAMERA.fullmatch(r[0]))==video)):
+                    r for r in records if r[0] in (script.CAMERAS if video else script.STATES))):
                 self.assertEqual(parallel.worker(root/'out',0,1),0)
             parallel.finalize(root/'out')
             import json

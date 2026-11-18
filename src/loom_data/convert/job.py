@@ -44,7 +44,7 @@ def validate_plan(plan):
     if plan.get('id') != digest({k: v for k, v in plan.items() if k != 'id'}):
         raise StateError('Plan checksum mismatch')
     if plan.get('config', {}).get('params', {}).get('export_contract_version') != contract.VERSION:
-        raise StateError('Incompatible export contract: old TCP plans require a new output and re-export')
+        raise StateError('Incompatible export contract: older plans require a new output and re-export')
     if plan.get('config', {}).get('storage_budget') is not None and not isinstance(plan.get('storage_sampling'), dict):
         raise StateError('Incompatible storage budget plan; prepare a new output directory')
     ids = []

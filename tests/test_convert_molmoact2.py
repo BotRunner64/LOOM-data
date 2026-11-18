@@ -224,7 +224,7 @@ class MolmoAct2Tests(unittest.TestCase):
                 pq.write_table(pa.table({'episode_index': [7], 'task': [annotation]}), meta / 'tasks_annotated.parquet')
                 tasks, annotated = script.load_tasks(meta)
                 with patch.object(script, 'YamFK') as fk:
-                    times, _, instruction = script.read_episode(episode, tasks, annotated, fk)
+                    times, _, instruction, _ = script.read_episode(episode, tasks, annotated, fk)
                 self.assertEqual(instruction, [
                     {'start_ns': 0, 'end_ns': times[2] - times[0], 'text': '拿起杯子'},
                     {'start_ns': times[2] - times[0], 'end_ns': times[-1] - times[0], 'text': 'Put down'}])

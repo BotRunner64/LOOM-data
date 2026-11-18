@@ -7,7 +7,6 @@ import hashlib
 import os
 from itertools import islice
 from pathlib import Path
-import re
 
 from loom_data.video import VideoWriter
 from loom_data.sources.common import normalized_gripper
@@ -21,7 +20,8 @@ REPO_ID = 'genrobot2025/10Kh-RealOmin-OpenData'
 STATES = {f'/robot{i}/{topic}': f'{side}_{kind}'
           for i, side in enumerate(('left', 'right'))
           for topic, kind in (('vio/eef_pose', 'eef'), ('sensor/magnetic_encoder', 'gripper'))}
-CAMERA = re.compile(r'^/robot([01])/sensor/camera(\d+)/compressed$')
+CAMERAS = {'/robot0/sensor/camera0/compressed': 'left_wrist',
+           '/robot1/sensor/camera0/compressed': 'right_wrist'}
 # Nominal V3 rear flange, transferred from the vendor's paired controller model
 # via the drive-pivot datum, then expressed about camera0's raw EE origin.
 # Reproduce with `loom-data robot realomin-mount`; model hashes and assumptions
@@ -32,14 +32,6 @@ DEFAULT_GRIPPER_OPEN = 0.103
 DEFAULT_GRIPPER_CLOSED = 0.
 
 
-def camera_id(topic):
-    match = CAMERA.fullmatch(topic)
-    if not match:
-        raise ValueError(f'Unsupported camera topic: {topic}')
-    side = ('left', 'right')[int(match[1])]
-    return f'{side}_wrist' + (f'_camera{match[2]}' if int(match[2]) else '')
-
-
 def messages(path, *, video=False):
     from google.protobuf.message import DecodeError
     from mcap.exceptions import EndOfFile, InvalidMagic, RecordLengthLimitExceeded
@@ -48,12 +40,7 @@ def messages(path, *, video=False):
     try:
         with path.open('rb') as handle:
             reader = make_reader(handle, decoder_factories=[DecoderFactory()])
-            summary = reader.get_summary()
-            if summary is not None:
-                available = {c.topic for c in summary.channels.values()}
-            else:
-                available = {c.topic for _, c, _ in reader.iter_messages()}
-            topics = sorted(t for t in available if CAMERA.fullmatch(t)) if video else list(STATES)
+            topics = list(CAMERAS if video else STATES)
             for _, channel, _, decoded in reader.iter_decoded_messages(topics=topics):
                 fields = decoded.DESCRIPTOR.fields_by_name if hasattr(decoded, 'DESCRIPTOR') else None
                 if fields is not None and 'header' not in fields:
@@ -146,7 +133,7 @@ def convert_episode(source, destination, transform=None,
     (destination / 'rgb').mkdir(parents=True)
     with ExitStack() as stack:
         for topic, timestamp, decoded in messages(Path(source['path']), video=True):
-            camera = camera_id(topic)
+            camera = CAMERAS[topic]
             if camera not in videos:
                 videos[camera] = VideoWriter(destination / 'rgb' / f'{camera}.mp4', decoded.format)
                 stack.callback(videos[camera].close)
