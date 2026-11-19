@@ -135,7 +135,6 @@ R_world_mount = R_world_raw
 `meta/episodes/**/*.parquet`，按元数据中的文件索引与数据范围读取逐帧表，并按所选
 视频各自的 `[from_timestamp, to_timestamp)` 截取拼接视频。从前一个关键帧开始解码，
 仅保留当前 episode 的显示帧，重新编码为 H.264（CRF 18、fast），校验时间区间与帧数。
-MP4 播放时间从零开始，输出 Parquet 时间戳仍来自原生 `timestamp`，不从视频 FPS 推算。
 完整数据输出 ID 为 `chunk_XXXX_part_YYYY_episode_NNNNNN`，避免分片内重复编号；子集沿用 `episode_NNNNNN`。
 完整数据按 shard 分配 worker：每个 worker 只缓存当前 shard 的一个数据文件所需列，所选视频逐路处理。
 
@@ -148,23 +147,23 @@ MP4 播放时间从零开始，输出 Parquet 时间戳仍来自原生 `timestam
   依据和适用限制见上文「坐标系与夹爪」。
 - 从原始旋转前两行恢复第三行，再按契约写出完整矩阵；不是将源 6D 数值直接透传，
   也不是将整个旋转取逆。先用绝对容差 `1e-5` 检查行正交与单位长度，再用
-  Gram–Schmidt 消除 float32 舍入误差，输出位置加按列展平的旋转矩阵 `float64[12]`。
+  Gram–Schmidt 消除 float32 舍入误差，输出位置加按列展平的旋转矩阵（12 个分量）。
 - 夹爪按单指角处理，全开值固定采用 35°（约 `0.6108652382` rad），闭合值为 0，
   直接以 `clip(angle / radians(35), 0, 1)` 归一化，不乘以 2。
   两手及全部 episode 使用相同端点。覆盖端点时公式为
   `clip((angle - closed_rad) / (open_rad - closed_rad), 0, 1)`。
   有限越界值裁剪，非有限值报错；不按 episode 或 shard 的统计极值重标定。
 
-### 时间、视频和指令
+### 同步、视频和指令
 
-- 使用 `round(float(timestamp) * 1e9)` 转为 int64 纳秒；保留源 float32 的精度及
-  间隔，不根据 FPS 或行号重新生成时间。全部流统一减去首行时间。
-- 输出四张独立 state 表。源发布本身是同步行格式，转换不会虚构异步采样时刻。
-- 头部主相机 `head_main` 映射为 `top`，`left_hand_up`、`right_hand_up` 分别映射为 `left_wrist`、`right_wrist`。子集布局中，每个入选视频必须是仅含一个
-  H.264 视频流的 MP4；逐帧解码验证显示帧数和分辨率后逐字节复制，不再次有损编码。
-  帧索引为 `0..N-1`，其时间来自源表；视频容器 PTS 不参与采样时刻计算。
-- 按逐行 `task_index` 的变化生成指令区间。第一条从共同零点开始，末段终点为最后
-  样本时间；同一时刻最后一个任务生效，零时长区间省略，相同文本连续行合并。
+- 源发布本身是同步行格式：每行一个共同的 `timestamp`，各路视频的第 `i` 帧对应第 `i` 行。
+  `info.json` 的 `fps` 为 30（误差 1% 内）时按行透传，第 `k` 行即第 `k` 帧，时间改写为 `k/30`；
+  否则按行时间戳重采样到 30 fps（契约第 3 节）。
+- 头部主相机 `head_main` 映射为 `top`，`left_hand_up`、`right_hand_up` 分别映射为 `left_wrist`、`right_wrist`。
+  入选视频逐帧解码，校验显示帧数和分辨率，缩放到契约分辨率后重新编码为 H.264；
+  视频容器 PTS 只用于在拼接视频中定位片段。
+- 每帧取对应源行 `task_index` 的指令文本；同一时刻最后一个任务生效。
+- 允许的布局只有一种相机集合：`top`、`left_wrist`、`right_wrist` 三路齐全。缺任何一路的 episode 不导出，记为 `unsupported_layout`。
 
 ### 校验
 

@@ -16,14 +16,14 @@ loom-data robot          机器人模型工具
 
 ## 目录约定
 
-使用旧相机命名或包含辅助视角的导出需要用新版转换器写到新的输出目录。续跑计划会核对导出契约版本。
+旧格式（异步的逐 episode 目录加 `episodes.jsonl`）的导出不能续跑或原地升级，需要用新版转换器写到新的输出目录。续跑计划会核对导出契约版本。
 
 默认路径都相对仓库根目录；设置环境变量 `LOOM_DATA_ROOT` 可以换一个根目录。
 
 ```text
 dataset/manifests/         下载清单
 dataset/raw/<数据集名>/     源数据
-dataset/export/<数据集名>/  导出数据（符合导出契约）
+dataset/export/<数据集名>/<布局名>/  导出数据：每个相机布局一个 LeRobot v3.0 数据集
 dataset/work/              转换和检测的续跑状态
 assets/robot_models/       机器人模型
 ```
@@ -60,6 +60,8 @@ loom-data convert run --dataset abc130k --workers 8
 
 - **中断后重跑同一条命令即可续跑**，已完成的 episode 不会重转。可以换 `--workers` 数量。
 - 导出目录只在全部完成后才出现；过程中的数据在工作目录里。
+- 转换器自动按相机集合和分辨率把 episode 分到各布局的数据集里，例如
+  `dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480/`。发布时打印每个布局的 episode 数和帧数。
 - 每个 worker 的编解码都是单线程，提速靠增加 worker 数。
 - 设置 `LOOM_DATA_NO_PROGRESS=1` 关闭进度条。
 
@@ -106,7 +108,7 @@ loom-data convert finalize --output-dir dataset/export/ABC-130K
 | 结局 | 含义 | 记录位置 |
 |---|---|---|
 | 导出 | 转换成功并通过格式校验 | `records/<id>.json` 和导出目录 |
-| 跳过 / drop | 数据源规定不要的数据：Galaxea 的非静止轨迹；RealOmin、AgiBot Beta 的源数据异常 | `records/<id>.json`，含原因 |
+| 跳过 / drop | 契约或数据源规定不要的数据。所有源：相机集合不在允许布局内（`unsupported_layout`）、源采样有间隙（`sampling_gap`）、各流没有共同时间段（`no_common_interval`）。此外 Galaxea 的非静止轨迹；RealOmin、AgiBot Beta 的源数据异常 | `records/<id>.json`，含原因 |
 | 失败 | 程序、依赖、磁盘错误，或其他数据源的坏数据 | `errors/<id>.err`，含 traceback |
 
 有 episode 失败时命令返回非零，不发布。这时二选一：
@@ -127,9 +129,13 @@ plan.json                  固定的配置、任务清单和输入文件指纹
 records/<episode_id>.json  一个已导出或已跳过的 episode
 errors/<episode_id>.err    未完成 episode 最近一次的失败信息
 logs/worker-*.err          每个 worker 的启动和运行日志（成功也会有）
-conversion_summary.json    导出、修复、drop、失败的数量和原因统计（RealOmin、AgiBot Beta）
-dataset/                   已完成的 episode，发布时整体改名为导出目录
+conversion_summary.json    导出、修复、drop、失败的数量和原因统计（有 drop 时写出）
+dataset/                   已完成的 episode（每集一个暂存目录），发布后删除
+publish/                   finalize 正在组装的各布局数据集，发布时整体改名为导出目录
+published.json             发布标记：各布局的 episode 数和帧数
 ```
+
+`finalize` 把暂存的 episode 按布局组装成 LeRobot v3.0 数据集：帧表合并写入 `data/`，每个 episode 的视频各占一个文件，从暂存目录硬链接过去，不重新编码。没有任何 episode 导出时 `finalize` 报错，不发布空数据集。
 
 `errors/` 为空不代表没有问题：被 SIGKILL（包括 OOM）或节点故障打断的 worker 来不及写错误记录。这时看 `logs/` 里最后处理的任务，并用 `sacct -j JOB_ID --format=JobID,State,ExitCode,MaxRSS` 查作业状态。
 
@@ -138,17 +144,17 @@ dataset/                   已完成的 episode，发布时整体改名为导出
 ## 检测异常
 
 ```bash
-loom-data check run dataset/export/ABC-130K --workers 8
+loom-data check run dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480 --workers 8
 ```
 
-报告默认写到 `<数据集>/anomalies.jsonl`，用 `--output` 修改。规则、阈值和报告格式见[异常报告](anomaly-report.md)；阈值都可以用命令行参数覆盖，见 `loom-data check run --help`。
+检测的对象是一个布局数据集。报告默认写到 `<数据集>/anomalies.jsonl`，用 `--output` 修改。规则、阈值和报告格式见[异常报告](anomaly-report.md)；阈值都可以用命令行参数覆盖，见 `loom-data check run --help`。
 
-检测只读 state 和相机索引的 Parquet，不解码视频。流程和转换一样：中断后重跑即可续跑；Slurm 上分三步执行：
+检测只读逐帧表里的 state，不解码视频。流程和转换一样：中断后重跑即可续跑；Slurm 上分三步执行：
 
 ```bash
-loom-data check prepare dataset/export/ABC-130K
-srun loom-data check worker dataset/export/ABC-130K
-loom-data check finalize dataset/export/ABC-130K
+loom-data check prepare dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480
+srun loom-data check worker dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480
+loom-data check finalize dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480
 ```
 
 与转换不同的是，检测的 `finalize` 要求每个 episode 都成功，不会省略失败的。全部成功后才替换报告，失败时保留旧报告。
@@ -159,19 +165,19 @@ loom-data check finalize dataset/export/ABC-130K
 
 ```bash
 loom-data stats                      # dataset/export 下的所有数据集
-loom-data stats dataset/export/ABC-130K --json
+loom-data stats dataset/export/ABC-130K --json   # 该源的所有布局
 loom-data anomaly-stats              # 汇总各数据集的 anomalies.jsonl
 ```
 
-两个命令都只读 `episodes.jsonl` 和异常报告，不打开 Parquet 或视频。
+路径可以是一个布局数据集、一个源的目录或导出根目录；每个布局数据集单独一行，名称为 `<源>/<布局>`。两个命令都不打开逐帧表或视频：`stats` 只读 `meta/info.json`，`anomaly-stats` 读 episode 元数据和异常报告。
 
-- `stats` 的时长取每个 episode 指令的最后一个 `end_ns`。
+- `stats` 的时长是总帧数除以 30。
 - `anomaly-stats` 的 `Records` 是报告行数；`Affected` 和各原因列按 episode 去重，原因之间可能重叠，不能相加。
 
 ## 查看
 
 ```bash
-loom-data view dataset/export/ABC-130K
+loom-data view dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480
 ```
 
 打开终端给出的 `http://127.0.0.1:8765/`。用 `--host`、`--port` 修改监听地址。通过 VS Code 或 notebook 的端口代理访问时，保留 URL 末尾的 `/`。
@@ -179,7 +185,7 @@ loom-data view dataset/export/ABC-130K
 viewer 只读导出目录，不依赖源数据、转换代码或机器人模型。
 
 - 页面上方是相机画面和四路 state 曲线，下方是左右臂 EEF 的 3D 位姿和 2 秒拖尾。它们共用一条时间轴，可以拖动或播放。
-- 每路数据按自己的时间戳取当前时刻之前最近的样本，不插值。焦点在相机画面或曲线上时，左右方向键按该路的原生样本单步。
+- 所有数据在同一条 30 fps 帧序列上，显示当前时刻所在的帧。焦点在相机画面或曲线上时，左右方向键按帧单步。
 - 3D 视图里红、绿、蓝轴是工具的 X、Y、Z，白球是 EEF 原点（夹爪安装接口）。左右臂各在自己的参考系里显示，不做跨臂拼接；几何体尺寸只是示意。
 - 导出目录下有 `anomalies.jsonl` 时自动加载，也可以用 `--anomalies` 指定报告。异常可以按 episode、数据流、原因筛选，点击后跳到对应时刻。报告在启动时读取，更新后要重启 viewer。
 

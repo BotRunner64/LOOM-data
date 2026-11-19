@@ -6,8 +6,9 @@
 src/loom_data/
 ├── cli.py            命令入口：loom-data <command>
 ├── paths.py          默认目录
-├── contract.py       导出契约的代码形式：文件名、schema、写入、校验
-├── video.py          视频解码、转码、切段
+├── contract.py       导出契约的代码形式：schema、暂存 episode 的写入与校验、数据集的组装与读取
+├── sync.py           重采样到 30 fps 帧序列：帧时刻、插值、最近帧
+├── video.py          视频解码，按帧序列选帧、缩放并编码
 ├── geometry.py       位姿和工具变换
 ├── resumable.py      可续跑作业的公共部分：原子写入、输入指纹、worker 启动与日志
 ├── sources/          每个数据源一个模块，实现统一接口
@@ -20,7 +21,7 @@ src/loom_data/
 
 依赖方向是单向的：
 
-- `contract.py` 是唯一了解导出格式的地方。转换通过它写入和校验；检测和 viewer 从它取文件名和列名。
+- `contract.py` 是唯一了解导出格式的地方。转换通过它写入和校验；检测和 viewer 通过 `contract.Dataset` 读取。
 - `sources/` 只负责「这个数据源的一个 episode 怎么变成契约格式」，不关心并行、续跑和发布。
 - `convert/job.py` 只负责计划、续跑和发布，不包含任何数据源的知识。
 - `check/` 和 `viewer/` 只读导出数据，不依赖 `sources/`。
@@ -33,15 +34,17 @@ src/loom_data/
 
 1. **prepare** 发现所有任务，写成固定的计划。计划记录配置、任务顺序和输入文件的大小与修改时间。续跑时读取已有计划，不重新发现任务。
 2. **worker** 按 `任务序号 % worker 数 == 自己的编号` 领取任务，跳过已完成的 episode。因为分配只取决于固定的任务序号，换 worker 数不影响结果。
-3. **finalize** 核对计划中的每个 episode，生成 `episodes.jsonl`（或异常报告），然后把结果原子地改名到最终位置。
+3. **finalize** 核对计划中的每个 episode，把结果组装成各布局的 LeRobot v3.0 数据集（或异常报告），然后原子地改名到最终位置。
 
 转换时一个 episode 的提交顺序是：
 
-1. 在 worker 自己的暂存目录里写完，并通过 `contract.validate_episode` 校验；
+1. 在 worker 自己的暂存目录里写完一个暂存 episode（`frames.parquet` 和每路相机一个 `<camera_id>.mp4`，已经是 30 fps 同步数据），并通过 `contract.validate_episode` 校验；
 2. 把 `records/<id>.json` 原子地写入工作目录；
 3. 把 episode 目录原子地改名到 `dataset/episodes/<id>`。**这一步是提交点。**
 
 有效的 record 和 episode 目录同时存在、且文件清单和大小一致，才算已提交。只有 record 没有目录，说明在第 2、3 步之间中断，重跑时会重新转换。目录存在却没有 record、record 损坏等矛盾状态会报错停止，不会被静默跳过或覆盖。
+
+暂存 episode 是内部格式，不是导出格式。`finalize` 用 `contract.build_dataset` 把它们按布局组装成数据集：帧表按计划顺序合并，`episode_index` 连续编号，视频硬链接到每集一个文件，统计量由各集的累计值合成。组装完成并写下 `published.json` 后改名发布，再删除暂存目录。组装中断时重跑 `finalize` 会从暂存 episode 重新组装。
 
 调度单位随数据源的读取方式而定：多数源一个任务是一个 episode；HiFi-UMI 完整数据是一个 shard，AgiBot World 2026 是一个归档。提交单位始终是 episode。
 
@@ -57,6 +60,7 @@ src/loom_data/
        name = 'my_source'
        model = None            # 需要机器人模型时填 assets/robot_models 下的目录名
        policy = 'strict'       # 'skip'：episode() 可返回 None；'drop'：SourceDataError 记为 drop
+       camera_sets = (('left_wrist', 'right_wrist', 'top'),)   # 允许的相机集合，其余记为 unsupported_layout
        OPTIONS = {             # 本数据源的命令行选项
            'eef_offset': dict(type=float, nargs=3, help='...'),
        }
@@ -70,13 +74,19 @@ src/loom_data/
            """返回 (任务列表, 共享的输入文件)。每个任务含 source、episode_ids、inputs。"""
 
        def episode(self, task, destination):
-           """把一个 episode 写到 destination，返回它的 episodes.jsonl 记录。"""
+           """把一个 episode 暂存到 destination，返回 contract.episode_record(...)。"""
    ```
 
-   `episode()` 用 `contract.write_state`、`contract.write_video_index` 和 `video.py` 里的函数写文件。一个任务包含多个 episode 时改为重写 `process()`，参考 `sources/agibotworld2026.py`。
+   `episode()` 分三步：
+   - 确定帧时刻。各流异步的源用 `sync.frame_grid(各流的时间戳)`；已经逐帧对齐的帧表用 `sync.table_grid(行时间戳, 源声明的 fps)`，它在源为 30 fps 时返回 `None`，表示按行透传。
+   - `contract.write_frames(destination, 四路 state 的 (时间戳, 值), 指令区间, 时间原点, grid)` 完成插值并写出帧表。
+   - 每路相机用 `video.transcode_video`、`video.extract_video_segment` 或 `video.VideoWriter` 按同一个 `grid` 选帧、缩放并编码，把返回值交给 `contract.episode_record`。
+
+   源只需提供原生样本和采集时刻，重采样、分辨率和布局都由公共代码处理。一个任务包含多个 episode 时改为重写 `process()`，并通过 `self.commit(...)` 提交，参考 `sources/agibotworld2026.py`。
 
 3. 需要下载子集时，新建 `download/<键>.py`，提供 `REPO_ID`、`MANIFEST`、`WORKERS`、`COMMANDS` 和 `add_arguments`，参考 `download/realomin.py`。
-4. 在 `docs/sources/` 写一页说明：原始格式，以及到契约的映射规则。契约要求每个源记录它的工具变换和安装接口原点。
+4. 在 `docs/sources/` 写一页说明：原始格式，以及到契约的映射规则。契约要求每个源记录它的工具变换和安装接口原点、原生帧率和同步路径（透传或重采样）、允许的布局。
+5. 源相机的宽高比不在契约第 5 节的分辨率表里时，先在契约和 `contract.RESOLUTIONS` 登记。
 
 作业、检测、统计和 viewer 都不用改。
 

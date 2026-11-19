@@ -1,20 +1,16 @@
 """Anomaly rules for exported episodes: boundary idling, state jumps and long internal pauses.
 
-Rules read the native state samples; nothing is resampled. `loom_data.check.job`
-runs them over a dataset.
+Rules read the exported 30 fps state frames. `loom_data.check.job` runs them
+over a dataset.
 """
 
 from dataclasses import dataclass, fields
 import math
 from pathlib import Path
-import re
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 
-
-from loom_data.contract import STATE_NAMES
+from loom_data.contract import STATE_NAMES, STATE_SLICES, frame_times, is_pose
 NS_PER_SECOND = 1_000_000_000
 
 
@@ -46,8 +42,8 @@ def rotation_quaternions(poses):
     """Contract column ordered 3x3 rotation matrices to unit wxyz quaternions."""
     r = poses[:, 3:12].reshape(-1, 3, 3).transpose(0, 2, 1).copy()
     if (not np.isfinite(r).all()
-            or not np.allclose(r @ np.swapaxes(r, 1, 2), np.eye(3), atol=1e-6, rtol=0)
-            or not np.allclose(np.linalg.det(r), 1, atol=1e-6, rtol=0)):
+            or not np.allclose(r @ np.swapaxes(r, 1, 2), np.eye(3), atol=1e-5, rtol=0)
+            or not np.allclose(np.linalg.det(r), 1, atol=1e-5, rtol=0)):
         raise ValueError('Invalid rotation matrix')
     r00, r11, r22 = r[:, 0, 0], r[:, 1, 1], r[:, 2, 2]
     squared = np.column_stack((1+r00+r11+r22, 1+r00-r11-r22,
@@ -87,52 +83,16 @@ class StateStream:
                    > config.orientation_tolerance_deg))
 
 
-def read_times(table, path):
-    column = table['timestamp_ns']
-    if column.type != pa.int64() or column.null_count:
-        raise ValueError(f'{path}: timestamps must be non-null int64')
-    times = column.to_numpy()
-    if not len(times) or times[0] < 0 or np.any(times[1:] < times[:-1]):
-        raise ValueError(f'{path}: empty, negative or unordered timestamps')
-    return times
-
-
-def episode_paths(root, record):
-    """Validate manifest identifiers and list only the inputs detection reads."""
-    episode_id = record['episode_id']
-    if (not isinstance(episode_id, str) or episode_id in ('', '.', '..')
-            or '/' in episode_id or '\\' in episode_id):
-        raise ValueError(f'Invalid episode_id: {episode_id!r}')
-    base = root / 'episodes' / episode_id
-    cameras = record['cameras']
-    if (not isinstance(cameras, list) or not cameras
-            or any(not isinstance(c, str) or not re.fullmatch(r'[a-z0-9_]+', c) for c in cameras)
-            or len(set(cameras)) != len(cameras)):
-        raise ValueError(f'{episode_id}: invalid cameras')
-    return ([base / 'state' / f'{name}.parquet' for name in STATE_NAMES]
-            + [base / 'rgb' / f'{camera}.parquet' for camera in cameras])
-
-
-def read_episode(root, record):
-    paths = episode_paths(root, record)
+def read_episode(dataset, episode):
+    """State streams of one episode of a `contract.Dataset`, on the 30 fps frame clock."""
+    state, _ = dataset.frames(episode)
+    times = frame_times(len(state))
     streams = {}
-    for name, path in zip(STATE_NAMES, paths):
-        pose = name.endswith('_eef')
-        field = 'pose' if pose else 'openness'
-        table = pq.read_table(path, columns=['timestamp_ns', field])
-        times = read_times(table, path)
-        values = np.asarray(table[field].to_pylist(), dtype=np.float64)
-        if (table[field].null_count or not np.isfinite(values).all()
-                or values.shape != ((len(times), 12) if pose else (len(times),))):
-            raise ValueError(f'{path}: invalid {field}')
-        if not pose and np.any((values < 0) | (values > 1)):
-            raise ValueError(f'{path}: openness outside [0,1]')
-        streams[name] = StateStream(times, values, rotation_quaternions(values) if pose else None)
-    end_ns = max(int(stream.times[-1]) for stream in streams.values())
-    for path in paths[len(STATE_NAMES):]:
-        times = read_times(pq.read_table(path, columns=['timestamp_ns']), path)
-        end_ns = max(end_ns, int(times[-1]))
-    return streams, end_ns
+    for name in STATE_NAMES:
+        values = state[:, STATE_SLICES[name]]
+        streams[name] = (StateStream(times, values, rotation_quaternions(values)) if is_pose(name)
+                         else StateStream(times, values[:, 0]))
+    return streams, int(times[-1])
 
 
 def state_distances(stream, left, right):
@@ -215,7 +175,7 @@ def state_change_times(stream, config):
 
 
 def detect_episode(index, streams, end_ns, config=Config()):
-    """Return contract records in rule order; timestamps remain native int64 ns."""
+    """Return report records in rule order; timestamps are int64 ns on the episode clock."""
     records = []
 
     def add(name, start, end, reason):
@@ -252,8 +212,6 @@ def detect_episode(index, streams, end_ns, config=Config()):
 def report_path(root, output=None):
     """Resolve the report destination and protect detection inputs."""
     output = Path(output).resolve() if output is not None else root / 'anomalies.jsonl'
-    manifest = root / 'episodes.jsonl'
-    if (output == manifest or output.suffix != '.jsonl'
-            or output.is_relative_to(root / 'episodes')):
-        raise ValueError('Output must be a .jsonl report outside episodes/ and cannot replace episodes.jsonl')
+    if output.suffix != '.jsonl' or any(output.is_relative_to(root / name) for name in ('meta', 'data', 'videos')):
+        raise ValueError('Output must be a .jsonl report outside the dataset\'s meta/, data/ and videos/')
     return output

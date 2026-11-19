@@ -6,12 +6,10 @@ import tempfile
 import unittest
 
 import numpy as np
-import pyarrow.parquet as pq
 
-from support import assert_conversion_fails, convert
+from support import assert_conversion_fails, convert, read_export
 from loom_data.convert import job as parallel
 from loom_data.sources import hifi_umi, realomin
-from loom_data.contract import validate_episode
 from loom_data.convert.config import make_config
 from loom_data.robot.kinematics import rpy_matrix
 from test_convert_hifi_umi import make_source, make_shard
@@ -66,10 +64,31 @@ class MountOriginTests(unittest.TestCase):
                                            np.cross(state[:, 3:6], state[:, 6:9])[:, 0]))
         np.testing.assert_allclose(pose[:, :3], state[:, :3] - .12 * raw_first_column, atol=1e-7)
 
+    def assert_positions(self, output, expected):
+        """Every frame of every exported episode has the expected mount positions; returns the episodes."""
+        episodes = read_export(output)
+        self.assertTrue(episodes)
+        for episode in episodes:
+            self.assertEqual(episode['layout'], 'top+left_wrist+right_wrist_640x480')
+            for side in ('left', 'right'):
+                # Fixture aperture varies widely while its raw pose stays fixed; only the
+                # gripper output should vary. Poses are stored as float32.
+                np.testing.assert_allclose(episode[f'{side}_eef'][:, :3],
+                                           np.tile(expected[side], (episode['length'], 1)), atol=1e-6)
+            self.assertGreater(np.ptp(episode['left_gripper']), .5)
+        return episodes
+
+    def assert_same_export(self, first, second):
+        self.assertEqual([(e['episode_id'], e['layout'], e['tasks']) for e in first],
+                         [(e['episode_id'], e['layout'], e['tasks']) for e in second])
+        for a, b in zip(first, second):
+            np.testing.assert_array_equal(a['state'], b['state'])
+
     def test_nominal_hifi_defaults_match_subset_shard_parallel_and_cli(self):
         import subprocess
         import sys
         expected = {'left': [3.88, 5., 6.], 'right': [1., 1.88, 3.]}
+        # The subset is a 30 fps table (rows pass through); the shard is 25 fps (rows are resampled).
         for layout in ('subset', 'shard'):
             with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -81,26 +100,15 @@ class MountOriginTests(unittest.TestCase):
                 parallel.prepare(config, root / 'parallel')
                 self.assertEqual(parallel.worker(root / 'parallel', 0, 1), 0)
                 parallel.finalize(root / 'parallel')
-                records = [json.loads(line) for line in (root / 'serial/episodes.jsonl').read_text().splitlines()]
-                for record in records:
-                    relative = Path('episodes') / record['episode_id']
-                    for output in ('serial', 'parallel'):
-                        validate_episode(root / output / relative, record)
-                        for side in ('left', 'right'):
-                            table = pq.read_table(root / output / relative / 'state' / f'{side}_eef.parquet')
-                            # Fixture aperture varies widely while its raw pose
-                            # stays fixed; only the gripper output should vary.
-                            np.testing.assert_allclose(np.array(table['pose'].to_pylist())[:, :3],
-                                                       np.tile(expected[side], (table.num_rows, 1)), atol=1e-7)
+                serial = self.assert_positions(root / 'serial', expected)
+                self.assertEqual(len(serial), 1 if layout == 'subset' else 2)
+                self.assert_same_export(serial, self.assert_positions(root / 'parallel', expected))
                 if layout == 'subset':
                     command = [sys.executable, '-m', 'loom_data', 'convert', 'run', '--dataset', 'hifi_umi',
                                '--input-dir', str(root / 'raw'), '--output-dir', str(root / 'cli')]
                     result = subprocess.run(command, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    for side in ('left', 'right'):
-                        path = relative / 'state' / f'{side}_eef.parquet'
-                        self.assertEqual(pq.read_table(root / 'cli' / path).to_pydict(),
-                                         pq.read_table(root / 'serial' / path).to_pydict())
+                    self.assert_same_export(serial, self.assert_positions(root / 'cli', expected))
 
     def test_nonzero_left_right_mounts_match_in_subset_shard_and_parallel_exports(self):
         offsets = {'left_eef_offset': [-.11, .02, .03], 'right_eef_offset': [-.15, -.01, .04]}
@@ -118,20 +126,9 @@ class MountOriginTests(unittest.TestCase):
                 parallel.prepare(config, concurrent)
                 self.assertEqual(parallel.worker(concurrent, 0, 1), 0)
                 parallel.finalize(concurrent)
-                serial_records = (serial / 'episodes.jsonl').read_text()
-                self.assertEqual([json.loads(line) for line in serial_records.splitlines()],
-                                 [json.loads(line) for line in (concurrent / 'episodes.jsonl').read_text().splitlines()])
-                for line in serial_records.splitlines():
-                    record = json.loads(line)
-                    episode = Path('episodes') / record['episode_id']
-                    validate_episode(serial / episode, record)
-                    validate_episode(concurrent / episode, record)
-                    for side in ('left', 'right'):
-                        relative = episode / 'state' / f'{side}_eef.parquet'
-                        table = pq.read_table(serial / relative)
-                        self.assertEqual(table.to_pydict(), pq.read_table(concurrent / relative).to_pydict())
-                        np.testing.assert_allclose(np.array(table['pose'].to_pylist())[:, :3],
-                                                   np.tile(expected[side], (table.num_rows, 1)), atol=1e-7)
+                episodes = self.assert_positions(serial, expected)
+                self.assertEqual(len(episodes), 1 if layout == 'subset' else 2)
+                self.assert_same_export(episodes, self.assert_positions(concurrent, expected))
                 self.assertTrue(all(p.read_bytes() == data for p, data in originals.items()))
 
     def test_old_tcp_plans_are_rejected_by_prepare_worker_and_finalize(self):

@@ -1,18 +1,21 @@
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import check
+from support import IDENTITY_POSE, check, expected_report, make_dataset
+from loom_data import contract
 from loom_data.check import anomalies as script
-from loom_data.contract import write_state, write_video_index
+from loom_data.sync import frame_ns
 
 
 def stream(seconds, positions=None, angles=None, openness=None):
@@ -327,50 +330,128 @@ class DatasetTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.base = self.root / 'episodes/sample'
-        for name, data in still(2).items():
-            write_state(self.base / 'state' / f'{name}.parquet', data.times, data.values, 0,
-                        pose=name.endswith('_eef'))
-        (self.base / 'rgb').mkdir()
-        write_video_index(self.base / 'rgb/top.parquet', [0, 5_000_000_000], 0)
-        self.record = {'episode_id': 'sample', 'cameras': ['top'],
-                       'instructions': [{'start_ns': 0, 'end_ns': 99_000_000_000, 'text': 'test'}]}
-        self.manifest = self.root / 'episodes.jsonl'
-        self.manifest.write_text('\n' + json.dumps(self.record) + '\n', encoding='utf-8')
+        self.root = Path(self.temp.name).resolve() / 'dataset'
+        # Episode 0 is too short for any rule; episode 1 is still for exactly 5 s (frames 0..150).
+        self.dataset = make_dataset(self.root, {'short': {'left_gripper': np.zeros(3)},
+                                                'sample': {'left_gripper': np.zeros(151)}})
+        self.data = self.dataset.data_path(self.dataset.episodes[0])
 
-    def test_jsonl_physical_line_index_camera_endpoint_and_no_video_decode(self):
-        self.assertEqual(check(self.root), (1, 2))
+    def rewrite_state(self, change):
+        """Rewrite the frame table after `change(state N x 26, columns)` edited it in place."""
+        table = pq.read_table(self.data)
+        state = np.array(table[contract.STATE_KEY].to_pylist(), dtype=np.float32)
+        columns = {name: np.array(table[name].to_pylist()) for name in table.schema.names[1:]}
+        keep = change(state, columns)
+        if keep is not None:
+            state, columns = state[keep], {name: values[keep] for name, values in columns.items()}
+        pq.write_table(pa.Table.from_arrays(
+            [pa.FixedSizeListArray.from_arrays(pa.array(state.reshape(-1), type=pa.float32()), contract.STATE_DIM),
+             *(pa.array(columns[f.name], type=f.type) for f in list(contract.DATA_SCHEMA)[1:])],
+            schema=contract.DATA_SCHEMA), self.data)
+
+    def test_read_episode_puts_every_stream_on_the_frame_clock(self):
+        poses = np.tile(IDENTITY_POSE, (4, 1))
+        poses[:, 0] = [0, .1, .2, .3]
+        root = self.root.with_name('streams')
+        dataset = make_dataset(root, {'still': {'left_gripper': np.zeros(2)},
+                                      'moving': {'left_eef': poses, 'right_gripper': [0, .25, .5, 1]}})
+        streams, end_ns = script.read_episode(dataset, dataset.episodes[1])
+        times = [frame_ns(k) for k in range(4)]
+        self.assertEqual(times, [0, 33_333_333, 66_666_667, 100_000_000])
+        self.assertEqual(end_ns, times[-1])
+        self.assertEqual(list(streams), list(script.STATE_NAMES))
+        for name, stream in streams.items():
+            self.assertEqual(stream.times.dtype, np.int64)
+            self.assertEqual(stream.times.tolist(), times)
+            self.assertEqual(stream.rotations is None, 'gripper' in name)
+        np.testing.assert_allclose(streams['left_eef'].values, poses, atol=1e-6)
+        np.testing.assert_allclose(streams['right_eef'].values, np.tile(IDENTITY_POSE, (4, 1)))
+        np.testing.assert_allclose(streams['left_eef'].rotations, np.tile([1., 0, 0, 0], (4, 1)))
+        np.testing.assert_allclose(streams['right_gripper'].values, [0, .25, .5, 1])
+        np.testing.assert_allclose(streams['left_gripper'].values, 0)
+        # The other episode sharing the data file is not mixed in.
+        self.assertEqual(script.read_episode(dataset, dataset.episodes[0])[1], frame_ns(1))
+
+    def test_report_uses_episode_index_and_last_frame_time_without_video_decode(self):
+        with patch('av.open', side_effect=AssertionError('detection must not open videos')):
+            self.assertEqual(check(self.root), (2, 2))
         rows = [json.loads(line) for line in (self.root / 'anomalies.jsonl').read_text().splitlines()]
-        self.assertTrue(all(row == dict(index=1, stream='left_eef', start_ns=0,
-                                       end_ns=5_000_000_000, reason='boundary_idle') for row in rows))
+        self.assertEqual(frame_ns(150), 5_000_000_000)
+        self.assertEqual(rows, [dict(index=1, stream='left_eef', start_ns=0,
+                                     end_ns=5_000_000_000, reason='boundary_idle')] * 2)
+
+    def test_exported_one_frame_spike_is_reported_at_its_frame_times(self):
+        openness = np.zeros(61)
+        openness[30] = .6
+        poses = np.tile(IDENTITY_POSE, (61, 1))
+        poses[30, 0] = .1
+        root = self.root.with_name('spike')
+        make_dataset(root, {'spike': {'right_eef': poses, 'left_gripper': openness}})
+        self.assertEqual(check(root), (1, 2))
+        report = (root / 'anomalies.jsonl').read_text()
+        self.assertEqual(report, expected_report(root))
+        self.assertEqual([json.loads(line) for line in report.splitlines()], [
+            dict(index=0, stream=name, start_ns=frame_ns(30), end_ns=frame_ns(31), reason='state_jump')
+            for name in ('right_eef', 'left_gripper')])
 
     def test_failure_preserves_previous_report_and_removes_temporary_file(self):
         output = self.root / 'report.jsonl'
         output.write_text('previous\n')
-        self.manifest.write_text(json.dumps(self.record) + '\n{}\n')
-        with self.assertRaisesRegex(ValueError, 'line 2'):
+        info = self.root / 'meta/info.json'
+        saved = info.read_text()
+        info.write_text(saved.replace('"fps": 30', '"fps": 25'))
+        with self.assertRaisesRegex(ValueError, 'not a contract dataset'):
+            check(self.root, output)
+        info.write_text('{bad json')
+        with self.assertRaisesRegex(ValueError, 'not an exported dataset'):
+            check(self.root, output)
+        # An episode that cannot be read fails the run after the plan exists.
+        info.write_text(saved)
+        self.rewrite_state(lambda state, columns: state.__setitem__((slice(None), 12), 2))
+        with self.assertRaisesRegex(RuntimeError, 'Detection failed'):
             check(self.root, output)
         self.assertEqual(output.read_text(), 'previous\n')
         self.assertEqual(list(self.root.glob('.*.tmp')), [])
 
     def test_rejects_invalid_state_and_protects_inputs(self):
-        for times, values in (([2, 1], [0, 0]), ([0, 1], [float('nan'), 0]),
-                              ([0, 1], [0, 2]), ([0, None], [0, 0])):
-            pq.write_table(pa.table({'timestamp_ns': pa.array(times, type=pa.int64()),
-                                     'openness': values}), self.base / 'state/left_gripper.parquet')
-            with self.subTest(times=times, values=values), self.assertRaises((ValueError, RuntimeError)):
+        saved = self.data.read_bytes()
+
+        def nonfinite(state, columns):
+            state[1, 12] = np.nan
+
+        def openness(state, columns):
+            state[-1, 25] = 2
+
+        def rotation(state, columns):
+            state[2, 3] = .5
+
+        def missing_frame(state, columns):
+            return np.arange(len(state)) != 100
+
+        def unordered_frames(state, columns):
+            columns['frame_index'][[3, 4]] = columns['frame_index'][[4, 3]]
+
+        for change in (nonfinite, openness, rotation, missing_frame, unordered_frames):
+            self.data.write_bytes(saved)
+            self.rewrite_state(change)
+            with self.subTest(change=change.__name__), self.assertRaises((ValueError, RuntimeError)):
                 check(self.root)
             self.assertFalse((self.root / 'anomalies.jsonl').exists())
-        for output in (self.manifest, self.base / 'report.jsonl', self.root / 'state.parquet'):
-            with self.assertRaises(ValueError):
+        self.data.write_bytes(saved)
+        for output in (self.root / 'meta/info.json', self.root / 'meta/report.jsonl',
+                       self.data.with_name('report.jsonl'), self.root / 'videos/report.jsonl',
+                       self.root / 'state.parquet'):
+            with self.subTest(output=output), self.assertRaises(ValueError):
                 check(self.root, output)
+            self.assertFalse(output.exists() and output.suffix == '.jsonl')
+        self.assertEqual(check(self.root, self.root.parent / 'elsewhere.jsonl'), (2, 2))
 
     def test_cli_and_threshold_override(self):
         result = subprocess.run([sys.executable, '-m', 'loom_data', 'check', 'run', str(self.root),
-                                 '--max-boundary-idle-s', '5'], capture_output=True, text=True)
+                                 '--max-boundary-idle-s', '5'], capture_output=True, text=True,
+                                env=dict(os.environ, LOOM_DATA_NO_PROGRESS='1'))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('wrote 0 anomalies', result.stdout)
+        self.assertIn('Checked 2 episodes; wrote 0 anomalies', result.stdout)
         self.assertEqual((self.root / 'anomalies.jsonl').read_text(), '')
 
 

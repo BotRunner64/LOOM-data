@@ -12,7 +12,8 @@ import numpy as np
 
 from loom_data.sources.common import normalized_gripper
 from loom_data.geometry import eef_offset, pose_matrix, tool_transform
-from loom_data.contract import encode_pose, write_state, write_video_index
+from loom_data.contract import encode_pose, episode_record, write_frames
+from loom_data.sync import table_grid
 from loom_data.video import transcode_video
 from loom_data.sources.policy import SourceDataError, source_value, stationary_base
 
@@ -218,8 +219,9 @@ def instructions(annotation, times):
         if stop_ns > begin_ns:
             output.append({'start_ns': begin_ns, 'end_ns': stop_ns, 'text': text})
         cursor, previous_stop = stop_ns, stop
-    if cursor < end-origin:
-        output.append({'start_ns': cursor, 'end_ns': end-origin, 'text': task.strip()})
+    if previous_stop < len(times):
+        # Frames after the last segment keep the task, down to a lone final frame.
+        output.append({'start_ns': cursor, 'end_ns': max(end-origin, cursor+1), 'text': task.strip()})
     return output
 
 
@@ -237,23 +239,21 @@ def convert_episode(source, destination, transforms=None,
     for k, side in enumerate(('left', 'right')):
         values[f'{side}_gripper'] = [source_value('invalid_gripper', normalized_gripper, v, gripper_closed, gripper_open)
                                    for v in fields['effector/position'][:, k]]
-    record = {'episode_id': destination.name, 'cameras': sorted(source['videos']),
-              'instructions': instructions(source['annotation'], times),
-              '_conversion': {'repairs': source.get('repairs', []) + repairs}}
-    for name, samples in values.items():
-        write_state(destination / 'state' / f'{name}.parquet', times, samples, times[0], pose=name.endswith('_eef'))
-    (destination / 'rgb').mkdir()
-    for camera, path in source['videos'].items():
-        transcode_video(path, destination / 'rgb' / f'{camera}.mp4', len(times))
-        # Upstream row/video mapping is by display-frame index. Use acquisition
-        # timestamp, never MP4 PTS or frame_index / 30.
-        write_video_index(destination / 'rgb' / f'{camera}.parquet', times, times[0])
-    return record
+    # State rows and video frames are aligned by display-frame index. The HDF5 carries
+    # no nominal rate, so the median acquisition interval decides between passing
+    # rows through (30 fps) and resampling them by acquisition time.
+    grid = table_grid(times)
+    length = write_frames(destination, {name: (times, samples) for name, samples in values.items()},
+                          instructions(source['annotation'], times), times[0], grid)
+    videos = {camera: transcode_video(path, destination / f'{camera}.mp4', times, grid)
+              for camera, path in source['videos'].items()}
+    return episode_record(destination.name, length, videos, source.get('repairs', []) + repairs)
 
 
 class AgiBotWorldBeta(Source):
     name = 'agibotworld_beta'
     policy = 'drop'
+    camera_sets = (('left_wrist', 'right_wrist', 'top'),)
     OPTIONS = {
         'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
                            help='mounting origin in source flange axes, metres (default: flange origin)'),

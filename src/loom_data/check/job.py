@@ -24,6 +24,7 @@ from dataclasses import asdict, fields
 from itertools import islice
 from pathlib import Path
 
+from loom_data import contract
 from loom_data.contract import STATE_NAMES
 from loom_data import resumable
 from loom_data.resumable import (
@@ -274,8 +275,8 @@ def prepare(root, output=None, config=None):
     output = detector.report_path(root, output)
     config = config or detector.Config()
     work = work_directory(output)
-    if work.is_relative_to(root / 'episodes') or work == root:
-        raise ValueError('Work directory must be outside episodes/')
+    if work == root or any(work.is_relative_to(root / name) for name in ('meta', 'data', 'videos')):
+        raise ValueError('Work directory must be outside the dataset\'s meta/, data/ and videos/')
     if work.is_symlink():
         raise StateError('Symlink work directory')
     if (work / 'plan.sqlite').exists():
@@ -287,29 +288,19 @@ def prepare(root, output=None, config=None):
         if work.exists() and any(p.name != 'logs' and not p.name.endswith('.tmp') for p in work.iterdir()):
             raise StateError('Work directory is not empty but has no plan.sqlite; '
                              'use a new report path or rebuild the recovery directory')
-        manifest = root / 'episodes.jsonl'
-        stamp = input_stamp(manifest)
-        total = 0
-        with manifest.open('rb') as source, progress('Counting manifest', stamp['size'], unit='byte') as bar:
-            for line in source:
-                total += bool(line.decode('utf-8').strip())
-                bar.update(len(line))
-        if not total:
-            raise ValueError('episodes.jsonl is empty')
-        check_inputs([stamp])
+        # info.json is rewritten whenever a dataset is rebuilt; it guards the whole plan.
+        stamp = input_stamp(root / 'meta/info.json')
+        dataset = contract.Dataset(root)
+
         def tasks():
-            with manifest.open(encoding='utf-8') as source, \
-                    progress('Preparing detection', total, unit='episode') as bar:
-                for index, line in enumerate(source):
-                    if not line.strip():
-                        continue
-                    try:
-                        record = json.loads(line)
-                        paths = detector.episode_paths(root, record)
-                        yield {'index': index, 'record': record,
-                               'inputs': [input_stamp(p) for p in paths]}
-                    except (ValueError, KeyError, TypeError, OSError) as exc:
-                        raise ValueError(f'{manifest}: line {index + 1}: {exc}') from exc
+            stamps = {}
+            with progress('Preparing detection', len(dataset.episodes), unit='episode') as bar:
+                for episode in dataset.episodes:
+                    path = dataset.data_path(episode)
+                    if path not in stamps:
+                        stamps[path] = input_stamp(path)
+                    yield {'index': episode['episode_index'], 'record': {'episode_id': episode['episode_id']},
+                           'inputs': [stamps[path]]}
                     bar.update()
             check_inputs([stamp])
 
@@ -356,6 +347,7 @@ def worker(root, output=None, worker_id=0, worker_count=1, *, report=None):
     config = detector.Config(**store.plan['config'])
     report = report or (lambda message: None)
     failures = 0
+    dataset = contract.Dataset(root)
     assigned = store.plan['tasks'][worker_id::worker_count]
     with progress(f'Worker {worker_id}', len(assigned), unit='episode') as bar:
         for task in assigned:
@@ -367,7 +359,10 @@ def worker(root, output=None, worker_id=0, worker_count=1, *, report=None):
                 continue
             error = store.work / 'errors' / f'{index}.err'
             try:
-                streams, end_ns = detector.read_episode(root, task['record'])
+                episode = dataset.episodes[index]
+                if episode['episode_id'] != task['record']['episode_id']:
+                    raise ValueError('Dataset episodes changed since prepare')
+                streams, end_ns = detector.read_episode(dataset, episode)
                 results = detector.detect_episode(index, streams, end_ns, config)
                 check_inputs(task['inputs'])
             except Exception:  # noqa: BLE001 - record episode failures and continue assigned work

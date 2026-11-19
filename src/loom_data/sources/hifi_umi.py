@@ -10,15 +10,16 @@ import tempfile
 import numpy as np
 import pyarrow.parquet as pq
 
-from loom_data.video import copy_h264_video
 from loom_data.geometry import eef_offset as validate_eef_offset
-from loom_data.contract import seconds_to_ns, write_state, write_video_index
+from loom_data.contract import episode_record, seconds_to_ns, write_frames
+from loom_data.sync import table_grid
 from loom_data.sources.common import task_instructions as instructions
 
 from loom_data.sources.lerobot_v3 import LeRobotV3Reader, selected_cameras, subset_tasks, video_features
-from loom_data.video import extract_video_segment
+from loom_data.video import extract_video_segment, transcode_video
 
-from loom_data.sources.base import Source, task_limit
+from loom_data.sources.base import CONTRACT_DROPS, Source, task_limit
+from loom_data.sources.policy import SourceDataError
 
 # Body-fixed virtual fingertip -> nominal rear/pivot datum, from the vendor's
 # approximate 12 cm finger length. Tracking paper + a real opening-only sample
@@ -100,6 +101,12 @@ def openness(angles, closed_rad=0., open_rad=DEFAULT_GRIPPER_OPEN_RAD):
     return np.clip((angles - closed_rad) / (open_rad - closed_rad), 0, 1)
 
 
+def declared_fps(info):
+    """The source's nominal frame rate, when its metadata states one."""
+    fps = info.get('fps')
+    return fps if isinstance(fps, (int, float)) and not isinstance(fps, bool) and fps > 0 else None
+
+
 def load_tasks(path):
     tasks = {}
     for row in pq.read_table(path, columns=['task_index', 'task']).to_pylist():
@@ -157,24 +164,24 @@ def read_rows(source, metadata, rows, tasks, closed_rad, open_rad, eef_offsets=N
     return times, streams, annotation, cameras
 
 
-def convert_episode(source, destination, tasks, closed_rad, open_rad, eef_offsets=None):
+def convert_episode(source, destination, tasks, closed_rad, open_rad, eef_offsets=None, fps=None):
     times, streams, annotation, cameras = read_episode(source, tasks, closed_rad, open_rad, eef_offsets)
     return write_episode(source.name, destination, times, streams, annotation, cameras,
-                         lambda key, target: copy_h264_video(
-                             source / 'videos' / f'{key}.mp4', target, len(times)))
+                         lambda key, target, grid: transcode_video(
+                             source / 'videos' / f'{key}.mp4', target, times, grid), fps)
 
 
-def write_episode(episode_id, destination, times, streams, annotation, cameras, video):
-    for name, values in streams.items():
-        write_state(destination / 'state' / f'{name}.parquet', times, values, times[0],
-                    pose=name.endswith('_eef'))
+def write_episode(episode_id, destination, times, streams, annotation, cameras, video, fps=None):
+    # The source supplies one shared timestamp per recorded row, so state and images
+    # are already aligned. Rows pass through at a nominal 30 fps; otherwise they are resampled.
+    grid = table_grid(times, fps)
+    length = write_frames(destination, {name: (times, values) for name, values in streams.items()},
+                          annotation, times[0], grid)
+    videos = {}
     for key, camera in cameras.items():
         print(f'  {camera}', flush=True)
-        target = destination / 'rgb' / camera
-        video(key, target.with_suffix('.mp4'))
-        write_video_index(target.with_suffix('.parquet'), times, times[0])
-    return {'episode_id': episode_id, 'cameras': sorted(cameras.values()),
-            'instructions': annotation}
+        videos[camera] = video(key, destination / f'{camera}.mp4', grid)
+    return episode_record(episode_id, length, videos)
 
 
 def discover_shards(source):
@@ -208,12 +215,13 @@ class ShardReader(LeRobotV3Reader):
         times, streams, annotation, cameras = read_rows(self.source, row, rows, self.tasks, closed_rad, open_rad, eef_offsets)
         episode_id = shard_episode_id(self.source, index)
         return write_episode(episode_id, destination, times, streams, annotation, cameras,
-                             lambda key, target: extract_video_segment(
-                                 row['videos'][key], target, len(times), self.fps))
+                             lambda key, target, grid: extract_video_segment(
+                                 row['videos'][key], target, times, self.fps, grid), self.fps)
 
 
 class HifiUmi(Source):
     name = 'hifi_umi'
+    camera_sets = (('left_wrist', 'right_wrist', 'top'),)
     OPTIONS = {
         'left_eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
                                 help='left mounting origin in the source virtual fingertip axes, metres (default -0.12 0 0)'),
@@ -263,10 +271,15 @@ class HifiUmi(Source):
     def tasks(self):
         return load_tasks(self.root / 'source/tasks.parquet')
 
+    @cached_property
+    def fps(self):
+        return declared_fps(json.loads((self.root / 'source/info.json').read_text(encoding='utf-8')))
+
     def episode(self, task, destination):
         params = self.params
         return convert_episode(Path(task['source']), destination, self.tasks,
-                               params['gripper_closed_rad'], params['gripper_open_rad'], params['eef_offsets'])
+                               params['gripper_closed_rad'], params['gripper_open_rad'], params['eef_offsets'],
+                               self.fps)
 
     def process(self, task, pending, staging, store, failed):
         if task.get('layout') != 'lerobot_v3_shard':
@@ -281,7 +294,12 @@ class HifiUmi(Source):
                 try:
                     record = reader.convert_episode(indices[episode_id], destination, params['gripper_closed_rad'],
                                                     params['gripper_open_rad'], params['eef_offsets'])
-                    store.commit(episode_id, destination, record)
+                    self.commit(store, episode_id, destination, record)
+                except SourceDataError as exc:
+                    if exc.reason in CONTRACT_DROPS:
+                        store.skip(episode_id, exc.reason, detail=str(exc))
+                    else:
+                        failed(episode_id, exc)
                 except Exception as exc:
                     failed(episode_id, exc)
 

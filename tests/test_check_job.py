@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -11,37 +12,43 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from loom_data import paths
-from support import expected_report
+from support import expected_report, make_dataset
 from loom_data.check import anomalies as detector
 from loom_data.check import job as parallel
-from loom_data.contract import write_state, write_video_index
 
 
 class ParallelDetectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temp.cleanup)
+        cls.template = Path(temp.name).resolve() / 'dataset'
+        # Episodes 0, 1, 3 and 4 are still for exactly 5 s (two boundary records each).
+        # Episode 2 is too short for any anomaly, which must still count as committed work.
+        make_dataset(cls.template, {f'episode-{i}': {'left_gripper': np.zeros(3 if i == 2 else 151)}
+                                    for i in range(5)})
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / 'dataset'
-        self.root.mkdir()
+        self.root = Path(self.temp.name).resolve() / 'dataset'
+        shutil.copytree(self.template, self.root)
         self.output = self.root / 'anomalies.jsonl'
-        self.records = []
-        # Blank lines preserve physical indices 1, 3, 5, 7, 9. One episode
-        # produces no anomalies, which must still count as committed work.
-        for i in range(5):
-            base = self.root / 'episodes' / f'episode-{i}'
-            times = np.array([0, 2 if i == 2 else 5_000_000_000], dtype=np.int64)
-            poses = np.tile([0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 1.], (2, 1))
-            for name in detector.STATE_NAMES:
-                write_state(base / 'state' / f'{name}.parquet', times,
-                            poses if name.endswith('_eef') else np.zeros(2), 0,
-                            pose=name.endswith('_eef'))
-            (base / 'rgb').mkdir()
-            write_video_index(base / 'rgb/top.parquet', times, 0)
-            self.records.append({'episode_id': f'episode-{i}', 'cameras': ['top']})
-        self.manifest = self.root / 'episodes.jsonl'
-        self.manifest.write_text(''.join('\n' + json.dumps(r) + '\n' for r in self.records))
+        self.info = self.root / 'meta/info.json'
+        self.data = self.root / 'data/chunk-000/file-000.parquet'
+        self.metadata = self.root / 'meta/episodes/chunk-000/file-000.parquet'
+
+    def rewrite_episodes(self, change):
+        """Rewrite the episode metadata rows; keep info.json's total in step."""
+        rows = change(pq.read_table(self.metadata).to_pylist())
+        pq.write_table(pa.Table.from_pylist(rows, schema=pq.read_schema(self.metadata)), self.metadata)
+        info = json.loads(self.info.read_text())
+        info['total_episodes'] = len(rows)
+        self.info.write_text(json.dumps(info))
 
     def cli(self, *args, env=None):
         return subprocess.run([sys.executable, '-m', 'loom_data', 'check', args[0], str(self.root), *args[1:]],
@@ -79,9 +86,9 @@ class ParallelDetectionTests(unittest.TestCase):
         original = detector.read_episode
         called = []
 
-        def read(root, record):
-            called.append(record['episode_id'])
-            return original(root, record)
+        def read(dataset, episode):
+            called.append(episode['episode_id'])
+            return original(dataset, episode)
 
         with patch.object(detector, 'read_episode', side_effect=read):
             for rank in range(2):
@@ -90,7 +97,8 @@ class ParallelDetectionTests(unittest.TestCase):
         self.assertEqual(committed, {p: p.read_bytes() for p in committed})
         self.assertEqual(parallel.finalize(self.root), (5, 8))
         self.assertEqual([json.loads(line)['index'] for line in self.output.read_text().splitlines()],
-                         [1, 1, 3, 3, 7, 7, 9, 9])
+                         [0, 0, 1, 1, 3, 3, 4, 4])
+        self.assertEqual(self.output.read_text(), expected_report(self.root))
 
     def test_plan_is_a_single_sqlite_database(self):
         store = parallel.prepare(self.root)
@@ -117,7 +125,7 @@ class ParallelDetectionTests(unittest.TestCase):
 
         with patch.object(parallel.json, 'loads', side_effect=load):
             self.assertEqual(parallel.worker(self.root, worker_id=1, worker_count=3), 0)
-        self.assertEqual(decoded, [3, 9])
+        self.assertEqual(decoded, [1, 4])
         self.assertEqual(parallel.worker(self.root, worker_id=6, worker_count=8), 0)
         self.assertEqual(store.audit(), (2, 0, 3))
 
@@ -158,7 +166,8 @@ class ParallelDetectionTests(unittest.TestCase):
         stamp = parallel.input_stamp
 
         def interrupted(path):
-            if Path(path).parent.parent.name == 'episode-2':
+            # info.json is stamped first; the episodes' data file while tasks stream into the plan.
+            if Path(path) == self.data:
                 raise KeyboardInterrupt()
             return stamp(path)
 
@@ -186,15 +195,15 @@ class ParallelDetectionTests(unittest.TestCase):
         store = parallel.prepare(self.root)
         original = detector.read_episode
 
-        def read(root, record):
-            if record['episode_id'] == 'episode-1':
+        def read(dataset, episode):
+            if episode['episode_id'] == 'episode-1':
                 raise OSError('temporary read failure')
-            return original(root, record)
+            return original(dataset, episode)
 
         with patch.object(detector, 'read_episode', side_effect=read):
             self.assertEqual(parallel.worker(self.root), 1)
         self.assertEqual(store.audit(), (4, 1, 0))
-        error = store.work / 'errors/3.err'
+        error = store.work / 'errors/1.err'
         self.assertIn('temporary read failure', error.read_text())
         with self.assertRaisesRegex(parallel.StateError, '1 failed'):
             parallel.finalize(self.root)
@@ -223,9 +232,9 @@ class ParallelDetectionTests(unittest.TestCase):
     def test_audit_counts_errors_only_for_uncommitted_results(self):
         store = parallel.prepare(self.root)
         parallel.worker(self.root, worker_id=0, worker_count=5)
-        (store.work / 'errors/1.err').write_text('stale failure')
-        (store.work / 'errors/3.err').write_text('failed episode')
-        (store.work / 'errors/5.err').symlink_to(store.work / 'missing-error')
+        (store.work / 'errors/0.err').write_text('stale failure')
+        (store.work / 'errors/1.err').write_text('failed episode')
+        (store.work / 'errors/2.err').symlink_to(store.work / 'missing-error')
         self.assertEqual(store.audit(), (1, 1, 3))
         with self.assertRaisesRegex(parallel.StateError, '1 failed, 3 unfinished'):
             store.audit(complete=True)
@@ -233,7 +242,7 @@ class ParallelDetectionTests(unittest.TestCase):
     def test_audit_rejects_result_symlinks_including_dangling_links(self):
         store = parallel.prepare(self.root)
         parallel.worker(self.root, worker_id=0, worker_count=5)
-        path = store.work / 'records/1.json'
+        path = store.work / 'records/0.json'
         saved = store.work / 'saved-result.json'
         path.rename(saved)
         for target in (saved, store.work / 'missing-result'):
@@ -276,6 +285,7 @@ class ParallelDetectionTests(unittest.TestCase):
               self.assertRaisesRegex(parallel.StateError, 'code changed')):
             parallel.worker(self.root)
         path = Path(store.plan['tasks'][0]['inputs'][0]['path'])
+        self.assertEqual(path, self.data)
         path.write_bytes(path.read_bytes() + b'changed')
         with self.assertRaisesRegex(ValueError, 'Source changed'):
             parallel.prepare(self.root)
@@ -287,7 +297,7 @@ class ParallelDetectionTests(unittest.TestCase):
     def test_damaged_result_and_foreign_records_block_publication(self):
         store = parallel.prepare(self.root)
         parallel.worker(self.root)
-        path = store.work / 'records/1.json'
+        path = store.work / 'records/0.json'
         original = path.read_bytes()
         value = json.loads(original)
         value['results'] = []
@@ -343,16 +353,86 @@ class ParallelDetectionTests(unittest.TestCase):
         self.assertEqual(list((store.work / 'logs').iterdir()), [])
         self.assertEqual(store.audit(), (0, 0, 5))
 
-    def test_protects_input_paths_and_rejects_duplicate_or_empty_manifest(self):
-        for output in (self.manifest, self.root / 'episodes/report.jsonl', self.root / 'report.txt'):
-            with self.assertRaises(ValueError):
+    def test_tasks_address_episodes_by_episode_index_and_stamp_their_data_file(self):
+        store = parallel.prepare(self.root)
+        self.assertEqual(list(store.plan['tasks']), [
+            {'index': i, 'record': {'episode_id': f'episode-{i}'}, 'inputs': [parallel.input_stamp(self.data)]}
+            for i in range(5)])
+        self.assertEqual(store.plan['manifest'], parallel.input_stamp(self.info))
+
+    def test_rebuilt_dataset_is_rejected_through_info_json(self):
+        store = parallel.prepare(self.root)
+        self.assertEqual(parallel.worker(self.root, worker_id=0, worker_count=2), 0)
+        self.info.write_text(self.info.read_text() + '\n')
+        for call in (lambda: parallel.prepare(self.root), lambda: parallel.worker(self.root),
+                     lambda: parallel.finalize(self.root)):
+            with self.assertRaisesRegex(ValueError, 'Source changed since prepare.*info.json'):
+                call()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(list((store.work / 'records').iterdir())), 3)
+
+    def test_worker_refuses_episodes_that_no_longer_match_the_plan(self):
+        store = parallel.prepare(self.root)
+        saved = self.metadata.read_bytes(), self.info.read_bytes()
+        stamp = os.stat(self.info)
+
+        def rename(rows):
+            rows[3]['episode_id'] = 'renamed'
+            return rows
+
+        # Episode metadata rewritten behind an unchanged info.json stamp.
+        self.rewrite_episodes(rename)
+        self.info.write_bytes(saved[1])
+        os.utime(self.info, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(parallel.worker(self.root), 1)
+        self.assertEqual(store.audit(), (4, 1, 0))
+        self.assertIn('Dataset episodes changed since prepare', (store.work / 'errors/3.err').read_text())
+        with self.assertRaisesRegex(parallel.StateError, '1 failed'):
+            parallel.finalize(self.root)
+        self.metadata.write_bytes(saved[0])
+        self.assertEqual(parallel.worker(self.root), 0)
+        self.assertEqual(parallel.finalize(self.root), (5, 8))
+
+    def test_protects_input_paths_and_rejects_invalid_duplicate_or_empty_datasets(self):
+        for output in (self.info, self.root / 'meta/report.jsonl', self.data.with_name('report.jsonl'),
+                       self.root / 'videos/report.jsonl', self.root / 'report.txt'):
+            with self.subTest(output=output), self.assertRaisesRegex(ValueError, 'Output must be'):
                 parallel.prepare(self.root, output)
-        self.manifest.write_text(json.dumps(self.records[0]) + '\n' + json.dumps(self.records[0]))
-        with self.assertRaisesRegex(ValueError, 'Duplicate episode_id'):
+        work = parallel.work_directory(self.output)
+        saved = self.metadata.read_bytes(), self.info.read_bytes()
+
+        def duplicate(rows):
+            rows[4]['episode_id'] = rows[0]['episode_id']
+            return rows
+
+        def gap(rows):
+            rows[4]['episode_index'] = 7
+            return rows
+
+        def unsafe(rows):
+            rows[1]['episode_id'] = '../outside'
+            return rows
+
+        for change in (duplicate, gap, unsafe, lambda rows: rows[:4] + rows[3:4], lambda rows: []):
+            self.rewrite_episodes(change)
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'invalid, duplicate or missing'):
+                parallel.prepare(self.root)
+            self.metadata.write_bytes(saved[0])
+        # info.json disagreeing with the episode metadata, or not describing a contract dataset.
+        for old, new, message in (('"total_episodes": 5', '"total_episodes": 4', 'invalid, duplicate or missing'),
+                                  ('"fps": 30', '"fps": 15', 'not a contract dataset'),
+                                  ('"v3.0"', '"v2.1"', 'not a contract dataset'),
+                                  ('{', '', 'not an exported dataset')):
+            text = saved[1].decode()
+            self.assertIn(old, text)
+            self.info.write_text(text.replace(old, new, 1))
+            with self.subTest(new=new), self.assertRaisesRegex(ValueError, message):
+                parallel.prepare(self.root)
+        self.info.unlink()
+        with self.assertRaisesRegex(ValueError, 'not an exported dataset'):
             parallel.prepare(self.root)
-        self.manifest.write_text('\n')
-        with self.assertRaisesRegex(ValueError, 'empty'):
-            parallel.prepare(self.root)
+        self.assertFalse((work / 'plan.sqlite').exists())
+        self.assertFalse(self.output.exists())
 
     def test_work_directory_is_outside_repository_exports(self):
         report = paths.ROOT / 'dataset/export/ABC-130K/anomalies.jsonl'

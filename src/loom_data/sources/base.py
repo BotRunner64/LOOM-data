@@ -15,6 +15,12 @@ from pathlib import Path
 from loom_data.sources.policy import SourceDataError
 
 
+UNSUPPORTED_LAYOUT = 'unsupported_layout'
+# Reasons the export contract itself gives for leaving an episode out. They apply to
+# every source, whatever its policy: no shared 30 fps interval, or a gap in the source data.
+CONTRACT_DROPS = frozenset({UNSUPPORTED_LAYOUT, 'no_common_interval', 'sampling_gap'})
+
+
 def task_limit(config):
     """Episode cap during discovery: the tighter of --limit and --limit-episodes."""
     return min((v for v in (config['limit'], config['limit_episodes']) if v is not None), default=None)
@@ -29,6 +35,9 @@ class Source:
     # drop:   bad source data (SourceDataError) is recorded with a reason and left out.
     policy = 'strict'
     skip_reason = ''
+    # Camera sets this source exports, as sorted tuples; None accepts every set. An episode
+    # with another set is left out and recorded as 'unsupported_layout' (export contract, section 2).
+    camera_sets = None
     # Source-specific options: option name -> argparse keyword arguments.
     OPTIONS = {}
 
@@ -54,7 +63,7 @@ class Source:
         self.model_dir = Path(config['model_dir']) if config['model_dir'] else None
 
     def episode(self, task, destination):
-        """Write one episode under `destination` and return its episodes.jsonl record."""
+        """Stage one episode under `destination` and return its `contract.episode_record`."""
         raise NotImplementedError
 
     def process(self, task, pending, staging, store, failed):
@@ -69,11 +78,19 @@ class Source:
         try:
             record = self.episode(task, destination)
         except SourceDataError as exc:
-            if not drops:
+            if not drops and exc.reason not in CONTRACT_DROPS:
                 raise
             store.skip(episode_id, exc.reason, detail=str(exc), reasons=exc.reasons)
             return
         if record is None:
             store.skip(episode_id, self.skip_reason)
+        else:
+            self.commit(store, episode_id, destination, record)
+
+    def commit(self, store, episode_id, destination, record):
+        """Commit a staged episode, unless its camera set is not one this source exports."""
+        cameras = tuple(record['cameras'])
+        if self.camera_sets is not None and cameras not in self.camera_sets:
+            store.skip(episode_id, UNSUPPORTED_LAYOUT, detail=f'Camera set {"+".join(cameras)} is not exported')
         else:
             store.commit(episode_id, destination, record)

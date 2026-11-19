@@ -11,12 +11,13 @@ from unittest.mock import patch
 import h5py
 import numpy as np
 
-from support import convert
+from support import convert, datasets, manifest
 from loom_data.convert import job as parallel
 from loom_data.sources import agibotworld_beta as beta, realomin
 from loom_data.convert.config import discover as discover_plan, make_config
 from loom_data.sources.policy import SourceDataError
 from test_convert_agibotworld_beta import make_source
+from test_convert_realomin import mcap, on_grid, reading
 
 
 def add_episode(root, index):
@@ -26,6 +27,18 @@ def add_episode(root, index):
     rows = json.loads(path.read_text())
     row = copy.deepcopy(rows[0]); row['episode_id'] = index
     rows.append(row); path.write_text(json.dumps(rows))
+
+
+def summary(output):
+    return json.loads(parallel.work_directory(output).joinpath('conversion_summary.json').read_text())
+
+
+def convert_dropping_everything(case, dataset, source, output, **options):
+    """Convert a source whose every episode is dropped: the drops are recorded, nothing is published."""
+    with case.assertRaisesRegex(parallel.StateError, 'nothing to publish'):
+        convert(dataset, source, output, **options)
+    case.assertFalse(Path(output).exists())
+    return summary(output)
 
 
 def zero_base(path, commands=True):
@@ -87,7 +100,7 @@ class BaseRecoveryTests(unittest.TestCase):
             root=Path(temporary);path=make_source(root/'raw')
             with h5py.File(path,'a') as h:h['action/end/position']=np.zeros((1,2,3))
             convert('agibotworld_beta', root/'raw',root/'out')
-            self.assertEqual(len((root/'out/episodes.jsonl').read_text().splitlines()),1)
+            self.assertEqual(manifest(root/'out'),[{'episode_id':'task_694_episode_123'}])
 
 
 class NativeDropTests(unittest.TestCase):
@@ -95,8 +108,7 @@ class NativeDropTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);state=make_source(root/'raw')
             state.write_bytes(b'not an HDF5 file')
-            convert('agibotworld_beta', root/'raw',root/'out')
-            s=json.loads((root/'out.work/conversion_summary.json').read_text())
+            s=convert_dropping_everything(self,'agibotworld_beta',root/'raw',root/'out')
             self.assertEqual(s['drop_reasons'],{'invalid_hdf5':1})
         with patch('h5py.File',side_effect=OSError('storage read failed without errno')):
             with self.assertRaises(OSError) as error:beta.read_state(Path('source.h5'))
@@ -114,8 +126,10 @@ class NativeDropTests(unittest.TestCase):
             self.assertEqual((summary['planned'],summary['exported'],summary['repaired'],summary['dropped']),(2,1,1,1))
             self.assertEqual(summary['repair_reasons'],{'deduplicated_annotation':1})
             self.assertEqual(summary['drop_reasons'],{'conflicting_annotation':1})
-            record=json.loads((root/'out/episodes.jsonl').read_text())
-            self.assertEqual(set(record),{'episode_id','cameras','instructions'})
+            # Only the consistent episode is published; how it was repaired stays in the work directory.
+            self.assertEqual(manifest(root/'out'),[{'episode_id':'task_694_episode_123'}])
+            (dataset,)=datasets(root/'out').values()
+            self.assertFalse([key for key in dataset.episodes[0] if 'conversion' in key or 'repair' in key])
             plan=json.loads((root/'out.work/plan.json').read_text())
             self.assertTrue(all('annotation' not in t for t in plan['tasks']))
 
@@ -125,11 +139,9 @@ class NativeDropTests(unittest.TestCase):
             (root/'raw/task_info/task_694.json').unlink()
             shutil.rmtree(root/'raw/observations')
             with patch.object(beta,'convert_episode',side_effect=AssertionError('must preflight-drop')):
-                convert('agibotworld_beta', root/'raw',root/'out')
-            s=json.loads((root/'out.work/conversion_summary.json').read_text())
+                s=convert_dropping_everything(self,'agibotworld_beta',root/'raw',root/'out')
             self.assertEqual(s['dropped'],1);self.assertEqual(s['drop_fraction'],1.)
             self.assertEqual(s['drop_reasons'],{'missing_annotation':1,'missing_rgb':1})
-            self.assertEqual((root/'out/episodes.jsonl').read_text(),'')
 
     def test_bad_episodes_drop_and_good_repaired_episode_resumes(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -192,8 +204,7 @@ class NativeDropTests(unittest.TestCase):
                 self.assertTrue(error_path.is_file())
                 parallel.finalize(root/'out')
                 self.assertTrue(store.published())
-                self.assertEqual([json.loads(line)['episode_id'] for line in
-                                  (root/'out/episodes.jsonl').read_text().splitlines()],['task_694_episode_123'])
+                self.assertEqual(manifest(root/'out'),[{'episode_id':'task_694_episode_123'}])
                 summary=json.loads((store.work/'conversion_summary.json').read_text())
                 self.assertEqual((summary['exported'],summary['failed'],summary['dropped'],summary['unfinished']),(1,1,0,0))
                 parallel.prepare(config,root/'out')
@@ -211,17 +222,37 @@ class NativeDropTests(unittest.TestCase):
 
     def test_realomin_finalize_accepts_recorded_runtime_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);source=root/'raw/clean_bowl/1/1.mcap'
-            source.parent.mkdir(parents=True);source.touch()
+            root=Path(temporary);mcap(root,'clean_bowl');mcap(root,'fold_towel')
+            ids={item['instruction']:episode_id for episode_id,item in realomin.discover(root/'raw')}
             store=parallel.prepare(make_config('realomin',root/'raw', eef_offset=[0., 0., 0.]),root/'out')
-            with patch.object(realomin,'convert_episode',side_effect=OSError(errno.ENOSPC,'disk full')):
+            original=realomin.convert_episode
+            def convert(source,destination,*args,**kwargs):
+                if source['instruction']=='clean bowl':raise OSError(errno.ENOSPC,'disk full')
+                return original(source,destination,*args,**kwargs)
+            with patch.object(realomin,'convert_episode',side_effect=convert),reading(on_grid(3)):
                 self.assertEqual(parallel.worker(root/'out',0,1),1)
             parallel.finalize(root/'out')
             self.assertTrue(store.published())
-            self.assertEqual((root/'out/episodes.jsonl').read_text(),'')
-            summary=json.loads((store.work/'conversion_summary.json').read_text())
-            self.assertEqual((summary['failed'],summary['dropped'],summary['unfinished']),(1,0,0))
-            self.assertTrue((store.work/'errors'/f'{store.ids[0]}.err').is_file())
+            self.assertEqual(manifest(root/'out'),[{'episode_id':ids['fold towel']}])
+            s=summary(root/'out')
+            self.assertEqual((s['exported'],s['failed'],s['dropped'],s['unfinished']),(1,1,0,0))
+            self.assertTrue((store.work/'errors'/f"{ids['clean bowl']}.err").is_file())
+
+    def test_finalize_refuses_to_publish_when_nothing_was_exported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);mcap(root,'clean_bowl')
+            store=parallel.prepare(make_config('realomin',root/'raw', eef_offset=[0., 0., 0.]),root/'out')
+            with patch.object(realomin,'convert_episode',side_effect=OSError(errno.ENOSPC,'disk full')):
+                self.assertEqual(parallel.worker(root/'out',0,1),1)
+            with self.assertRaisesRegex(parallel.StateError,'nothing to publish'):parallel.finalize(root/'out')
+            self.assertFalse((root/'out').exists());self.assertFalse(store.published())
+            s=summary(root/'out')
+            self.assertEqual((s['exported'],s['failed'],s['dropped'],s['unfinished']),(0,1,0,0))
+            # The failure stays retryable: a rerun converts the episode and publishes.
+            with reading(on_grid(3)):
+                self.assertEqual(parallel.worker(root/'out',0,1),0)
+            parallel.finalize(root/'out')
+            self.assertEqual(manifest(root/'out'),[{'episode_id':store.ids[0]}])
 
     def test_old_native_policy_cannot_be_loaded_by_workers_or_finalize(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -235,8 +266,8 @@ class NativeDropTests(unittest.TestCase):
 
     def test_interrupted_drop_record_is_not_retried(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);make_source(root/'raw')
-            shutil.rmtree(root/'raw/observations')
+            root=Path(temporary);make_source(root/'raw');make_source(root/'raw',124)
+            shutil.rmtree(root/'raw/observations/694/123')
             config=make_config('agibotworld_beta',root/'raw');store=parallel.prepare(config,root/'out')
             original=parallel.atomic_json
             def interrupted(path,value):
@@ -244,10 +275,18 @@ class NativeDropTests(unittest.TestCase):
                 if value.get('outcome')=='skipped':raise KeyboardInterrupt()
             with patch.object(parallel,'atomic_json',side_effect=interrupted):
                 with self.assertRaises(KeyboardInterrupt):parallel.worker(root/'out',0,1)
+            self.assertEqual(store.state('task_694_episode_123')['outcome'],'skipped')
+            self.assertIsNone(store.state('task_694_episode_124'))
             parallel.prepare(config,root/'out')
-            with patch.object(beta,'convert_episode',side_effect=AssertionError('drop is committed')):
-                self.assertEqual(parallel.worker(root/'out',0,3),0)
+            convert_episode=beta.convert_episode
+            def only_unfinished(source,destination,*args,**kwargs):
+                if destination.name.endswith('_123'):raise AssertionError('drop is committed')
+                return convert_episode(source,destination,*args,**kwargs)
+            with patch.object(beta,'convert_episode',side_effect=only_unfinished):
+                for rank in range(3):self.assertEqual(parallel.worker(root/'out',rank,3),0)
             parallel.finalize(root/'out');self.assertTrue(store.published())
+            self.assertEqual(manifest(root/'out'),[{'episode_id':'task_694_episode_124'}])
+            self.assertEqual(summary(root/'out')['drop_reasons'],{'missing_rgb':1})
 
     def test_native_local_processes_publish_drops_and_resume_with_new_worker_count(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -280,8 +319,7 @@ class NativeDropTests(unittest.TestCase):
             root=Path(temporary);source=root/'raw/Clutter Tidy-Up [Stage2]/00001/00001.mcap'
             source.parent.mkdir(parents=True);source.write_bytes(b'not an MCAP')
             self.assertEqual(realomin.discover(root/'raw')[0][1]['instruction'],'Clutter Tidy-Up [Stage2]')
-            convert('realomin', root/'raw',root/'out', eef_offset=[0., 0., 0.])
-            s=json.loads((root/'out.work/conversion_summary.json').read_text())
+            s=convert_dropping_everything(self,'realomin',root/'raw',root/'out', eef_offset=[0., 0., 0.])
             self.assertEqual(s['drop_reasons'],{'invalid_mcap':1})
 
     def test_realomin_missing_side_is_a_data_drop(self):
@@ -289,9 +327,8 @@ class NativeDropTests(unittest.TestCase):
             root=Path(temporary);source=root/'raw/clean_bowl/1/1.mcap'
             source.parent.mkdir(parents=True);source.touch()
             with patch.object(realomin,'messages',return_value=iter(())),patch.object(realomin,'VideoWriter') as video:
-                convert('realomin', root/'raw',root/'out', eef_offset=[0., 0., 0.])
+                s=convert_dropping_everything(self,'realomin',root/'raw',root/'out', eef_offset=[0., 0., 0.])
             video.assert_not_called()
-            s=json.loads((root/'out.work/conversion_summary.json').read_text())
             self.assertEqual(s['drop_reasons'],{'missing_state_stream':1})
 
 

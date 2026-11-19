@@ -68,7 +68,7 @@ loom-data convert run --dataset galaxea --workers 8
 | `task_index` / `coarse_task_index` | 本行细粒度 / 整体任务文本索引 |
 | `quality_index` / `coarse_quality_index` | 质量标签索引，不是任务指令 |
 
-源 LeRobot 已将状态与图像对齐到逐帧表。本地只有这一列共同时间戳，没有原始 ROS 各 topic 的独立采样时间。转换保留此发布格式的时间戳及全部样本，不能由此恢复原始异步采集时间；不按帧号、15 FPS 或视频 PTS 重造时间。
+源 LeRobot 已将状态与图像对齐到逐帧表。本地只有这一列共同时间戳，没有原始 ROS 各 topic 的独立采样时间。
 
 相机为 `head_rgb`、`head_right_rgb`、`left_wrist_rgb`、`right_wrist_rgb`，每集各自一个 MP4；本地为 AV1、15 FPS。每路显示顺序的帧数应与逐帧表相等。源文件分别存放头部双目的左右图像。
 
@@ -136,19 +136,20 @@ R1 Lite 的原生 ee_pose 已在安装法兰。R1 Pro 原生 ee_pose 位于 `gri
 
 本地 244 集按此规则接收 213 集、跳过 31 集；其中 R1 Lite 193 集，R1 Pro 20 集。
 
-被筛掉的 episode 以「跳过」记入工作目录的 `records/`，不进入导出；全部被筛掉时导出为空的 `episodes.jsonl`。源文件结构损坏、时序错误、错误本体或视频缺帧仍报错。
+被筛掉的 episode 以「跳过」记入工作目录的 `records/`，不进入导出；全部被筛掉时没有可发布的数据集，`finalize` 报错。源文件结构损坏、时序错误、错误本体或视频缺帧仍报错。
 
 ### 指令
 
 `tasks.jsonl` 同时包含动作文本、`null` 占位及质量标签。不可使用 `episodes.jsonl.tasks[0]` 作为整集指令，因为它可能是 `qualified` / `unqualified`。
 
-逐行优先使用 `task_index` 对应的文本；为空或 `null` / `none` / `nan` 时使用该行 `coarse_task_index`。保留中英双语文本及 `@` 分隔符。质量标签不能作为指令。连续相同文本合并，变化边界使用源行时间；最终区间截止到本集最后样本时间。
+逐行优先使用 `task_index` 对应的文本；为空或 `null` / `none` / `nan` 时使用该行 `coarse_task_index`。保留中英双语文本及 `@` 分隔符。质量标签不能作为指令。每个导出帧取其时刻所在源行的文本。
 
 ### 映射与输出
 
-- 保留源逐帧 `timestamp`，秒乘 `1e9` 后取整，所有 state 和 RGB 共享首样本原点，不由 FPS 推算时间。
+- 源帧表按 `info.json` 的 `fps`（本地为 15）与 30 比较：相差 1% 以内时按行透传；否则按行 `timestamp` 重采样到 30 fps（契约第 3 节）。15 fps 的源经重采样后，位姿和夹爪在相邻两行之间插值，每个源视频帧重复两次。
 - 实测原生末端位姿左乘躯干 FK，再右乘固定工具变换，输出底盘系下夹爪安装接口的位置和完整 3×3 旋转矩阵（按列展平）。底盘只作为筛选后假定固定的参考系，不导出底盘或 action。
 - G1 夹爪 `openness = clip(stroke_mm / 100, 0, 1)`；非有限值报错。
-- 选取 `head_rgb`、`left_wrist_rgb`、`right_wrist_rgb`，分别映射为 `top`、`left_wrist`、`right_wrist`。入选的 RGB 逐帧转为无音轨 H.264，逐路检查解码帧数，索引保存源时间；视频容器使用 30 FPS，不代表采集频率。
-- 指令按逐帧细粒度标签生成区间，缺失时回退到整体任务；不使用质量标签。重复时间戳的零长度区间不写入，保留该时刻最后生效的标签。
+- 选取 `head_rgb`、`left_wrist_rgb`、`right_wrist_rgb`，分别映射为 `top`、`left_wrist`、`right_wrist`。入选的 RGB 逐帧解码，缩放到契约分辨率后转为无音轨 H.264，逐路检查解码帧数。
+- 指令按逐帧细粒度标签生成，缺失时回退到整体任务；不使用质量标签。重复时间戳保留该时刻最后生效的标签。
+- 允许的布局只有一种相机集合：`top`、`left_wrist`、`right_wrist` 三路齐全。缺任何一路的 episode 不导出，记为 `unsupported_layout`。
 - episode ID 为 `<task_directory>_episode_<index:06d>`，避免不同任务的编号冲突。

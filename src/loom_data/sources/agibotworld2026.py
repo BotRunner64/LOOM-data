@@ -14,12 +14,14 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from loom_data.geometry import pose_matrix
-from loom_data.contract import seconds_to_ns, write_state, write_video_index
+from loom_data.contract import episode_record, seconds_to_ns, write_frames
+from loom_data.sync import table_grid
 from loom_data.video import transcode_video
 from loom_data.robot.kinematics import fk_poses
 from loom_data.robot.urdf_model import Robot, parse_urdf
 
-from loom_data.sources.base import Source
+from loom_data.sources.base import CONTRACT_DROPS, Source
+from loom_data.sources.policy import SourceDataError
 
 STATE_FIELDS = ('state/left_effector/position', 'state/right_effector/position',
                 'state/end/arm_position', 'state/end/arm_orientation', 'state/waist/position',
@@ -136,7 +138,7 @@ def instructions(info, episode_index, task, times):
                        and str(s.get('instruction', '')).strip()),
                       key=lambda s: s['start_frame_index'])
     output = []
-    cursor = 0
+    cursor = previous_stop = 0
     for segment in selected:
         start = int(segment['start_frame_index'])
         stop = int(segment['end_frame_index'])
@@ -151,13 +153,14 @@ def instructions(info, episode_index, task, times):
         if stop_ns > begin_ns:
             output.append({'start_ns': begin_ns, 'end_ns': stop_ns,
                            'text': segment['instruction'].strip()})
-        cursor = stop_ns
-    if cursor < end:
-        output.append({'start_ns': cursor, 'end_ns': end, 'text': task.strip()})
+        cursor, previous_stop = stop_ns, stop
+    if previous_stop < len(times):
+        # Frames after the last segment keep the task, down to a lone final frame.
+        output.append({'start_ns': cursor, 'end_ns': max(end, cursor + 1), 'text': task.strip()})
     return output
 
 
-def read_episode(member, archive, info, indices, fk, destination):
+def read_episode(member, archive, info, indices, fk):
     data = io.BytesIO(archive.extractfile(member).read())
     table = pq.read_table(
         data, columns=['observation.state', 'timestamp', 'frame_index', 'episode_index'])
@@ -204,10 +207,7 @@ def read_episode(member, archive, info, indices, fk, destination):
         values['right_eef'].append(right)
         values['left_gripper'].append(openness(state[indices['state/left_effector/position'][0]]))
         values['right_gripper'].append(openness(state[indices['state/right_effector/position'][0]]))
-    for name, samples in values.items():
-        write_state(destination / 'state' / f'{name}.parquet', times, samples, times[0],
-                    pose=name.endswith('_eef'))
-    return episode_index, times
+    return episode_index, times, values
 
 
 def archive_index(path):
@@ -280,13 +280,16 @@ def convert_archive(path, staged, fk, episode_limit=None, *, episode_ids=None,
                 continue
             destination = staging / selected[index]
             try:
-                _, times = read_episode(member, archive, info, indices, fk, destination)
-                record = {'episode_id': selected[index], 'cameras': sorted(cameras.values()),
-                          'instructions': instructions(info, index, metadata[index]['tasks'][0], times)}
-                ready[index] = (times, record)
+                _, times, values = read_episode(member, archive, info, indices, fk)
+                fps = info.get('fps')
+                grid = table_grid(times, fps if isinstance(fps, (int, float)) and not isinstance(fps, bool)
+                                  and fps > 0 else None)
+                length = write_frames(destination, {name: (times, samples) for name, samples in values.items()},
+                                      instructions(info, index, metadata[index]['tasks'][0], times), times[0], grid)
+                ready[index] = (times, grid, length)
             except Exception as exc:
                 fail(index, exc)
-    seen = {index: set() for index in ready}
+    seen = {index: {} for index in ready}
     committed = set()
     with tarfile.open(path, 'r|gz') as archive:
         for member in archive:
@@ -297,22 +300,21 @@ def convert_archive(path, staged, fk, episode_limit=None, *, episode_ids=None,
             index = int(local.split('_')[1])
             if index not in ready or index in broken or index in committed:
                 continue
-            times, record = ready[index]
-            rgb = staging / selected[index] / 'rgb'
+            times, grid, length = ready[index]
             try:
                 if key in seen[index]:
                     raise ValueError(f'{path}: duplicate video {member.name}')
-                rgb.mkdir(exist_ok=True)
                 temporary = staging / 'source.mp4'
                 with temporary.open('wb') as handle:
                     shutil.copyfileobj(archive.extractfile(member), handle)
                 try:
-                    transcode_video(temporary, rgb / f'{cameras[key]}.mp4', len(times))
+                    seen[index][key] = transcode_video(
+                        temporary, staging / selected[index] / f'{cameras[key]}.mp4', times, grid)
                 finally:
                     temporary.unlink(missing_ok=True)
-                write_video_index(rgb / f'{cameras[key]}.parquet', times, times[0])
-                seen[index].add(key)
-                if seen[index] == set(cameras):
+                if set(seen[index]) == set(cameras):
+                    record = episode_record(selected[index], length,
+                                            {cameras[k]: video for k, video in seen[index].items()})
                     if on_episode is not None:
                         on_episode(record, staging / selected[index])
                     completed[index] = record
@@ -330,6 +332,7 @@ class AgiBotWorld2026(Source):
     name = 'agibotworld2026'
     model = 'agibot_g2'
     accepts_file = True  # one .tar.gz archive
+    camera_sets = (('left_wrist', 'right_wrist', 'top'),)
     OPTIONS = {
         'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
                            help='mounting origin in source tool axes, metres (default 0 0 0)'),
@@ -371,9 +374,16 @@ class AgiBotWorld2026(Source):
 
     def process(self, task, pending, staging, store, failed):
         # One task is a whole archive, streamed once; episodes commit as they complete.
+        def on_error(episode_id, exc):
+            if isinstance(exc, SourceDataError) and exc.reason in CONTRACT_DROPS:
+                store.skip(episode_id, exc.reason, detail=str(exc))
+            else:
+                failed(episode_id, exc)
+
         convert_archive(Path(task['source']), staging, self.fk, episode_ids=pending,
-                        on_episode=lambda record, directory: store.commit(record['episode_id'], directory, record),
-                        on_error=failed)
+                        on_episode=lambda record, directory: self.commit(
+                            store, record['episode_id'], directory, record),
+                        on_error=on_error)
 
 
 SOURCE = AgiBotWorld2026

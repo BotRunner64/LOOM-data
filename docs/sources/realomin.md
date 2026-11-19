@@ -67,7 +67,7 @@ loom-data convert run --dataset realomin --workers 8
 
 实际样本的 `header.timestamp` 是约 `1.765e18` 的整数纳秒。
 转换读取 `header.timestamp`，不以 MCAP `log_time/publish_time` 替代，不转为浮点秒。
-四路 state 与导出的 RGB 的最早首样本共同归零；各路保留原生样本数量和间隔，不同步或插值。
+四路 state 与两路 RGB 各自独立采样，转换按契约第 3 节重采样到 30 fps，见下文「同步与视频」。
 右手消息中的 `header.topic_name` 有时仍写为 `/robot0/vio/eef_pose`，须以 MCAP channel 区分左右。
 
 `/vio/eef_pose` 位姿与同刻 `/sim/robot_info.base_link.transform` 一致；
@@ -159,11 +159,18 @@ URDF 的 SHA-256。固定关节数值与附件哈希保存在
 不会因不同技能下有同名 `00001.mcap` 而发生碰撞。修改数据根的相对目录结构会改变 ID。
 扫描排除隐藏缓存目录；`--limit` 按候选 episode 计数，在扫描过程中生效。
 
-### 视频
+### 同步与视频
 
-使用 MCAP 内嵌 Protobuf schema。只选 `robot0/1` 的中央相机 `camera0`，分别导出为 `left_wrist`、`right_wrist`，各流保留原生采样时刻。
-逐条 H.264 消息解码并统一编码无音轨 MP4，保留消息与显示帧的一一对应关系；
-消息数量、视频帧数不一致或显示帧对应时间递减时报错。RGB 使用实际解码尺寸，不依赖旧 `camera_info` 尺寸。
+使用 MCAP 内嵌 Protobuf schema。只选 `robot0/1` 的中央相机 `camera0`，分别导出为 `left_wrist`、`right_wrist`。
+
+帧序列覆盖四路 state 和两路相机都有数据的时间段。位姿做位置线性插值加旋转 slerp，夹爪线性插值，
+RGB 取采集时刻最近的原生帧。帧时刻两侧的 state 样本间隔超过 100 ms 或最近 RGB 帧偏离超过 50 ms 的
+episode 不导出，记为 `sampling_gap`；共同时间段不足两帧的记为 `no_common_interval`。
+
+逐条 H.264 消息解码，校验消息与显示帧一一对应；消息数量、视频帧数不一致或显示帧对应时间递减时整集 drop。
+RGB 以实际解码尺寸为准，不依赖旧 `camera_info` 尺寸：1600×1300（16:13）缩放为 640×520。
+
+允许的布局只有 `left_wrist+right_wrist_640x520`：两路腕部相机齐全。缺一路的 episode 不导出，记为 `unsupported_layout`。
 
 ### 数据 drop
 

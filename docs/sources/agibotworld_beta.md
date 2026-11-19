@@ -178,11 +178,15 @@ episode ID 为 `task_<task_id>_episode_<episode_id>`。
 
 ### 时间与视频
 
-HDF5 的整数纳秒 `timestamp` 用作四路 state 与各路 RGB 的采集时刻，不按 MP4 PTS 或 FPS 重建。
+HDF5 每行一个整数纳秒 `timestamp`，各路 MP4 的第 `i` 个显示帧对应第 `i` 行，state 与 RGB 已逐帧对齐。
+HDF5 不声明帧率，由相邻行时间间隔的中位数判断：与 1/30 秒相差 1% 以内时按行透传，第 `k` 行即第 `k` 帧；
+否则按行时间戳重采样到 30 fps（契约第 3 节），不使用 MP4 PTS。
 源法兰已包含腰部运动，转换只组合实测底盘位姿及固定工具变换，不依赖机器人模型资产。
 只选 `head_color`、`hand_left_color`、`hand_right_color`，分别映射为 `top`、`left_wrist`、`right_wrist`。
-入选的 MP4 完整解码再写 H.264，不保留音轨，帧数必须与 HDF5 行数相同。
-`action_config` 的指令帧区间映射到同一原始 clock；缺口使用整集任务文本。
+入选的 MP4 完整解码，缩放到契约分辨率后再写 H.264，不保留音轨，帧数必须与 HDF5 行数相同。
+`action_config` 的指令帧区间落到导出帧上；缺口使用整集任务文本。
+
+允许的布局只有一种相机集合：`top`、`left_wrist`、`right_wrist` 三路齐全。缺任何一路的 episode 不导出，记为 `unsupported_layout`。源相机为 640×480，导出布局为 `top+left_wrist+right_wrist_640x480`。
 
 ### 数据 drop
 

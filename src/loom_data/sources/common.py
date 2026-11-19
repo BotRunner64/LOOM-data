@@ -21,6 +21,8 @@ def task_instructions(task_indices, tasks, times):
             transitions[timestamp] = text
             previous = text
     starts = sorted(transitions)
+    # The last interval runs one nanosecond past the last row, so that a label which
+    # first appears on the last row still owns that row's frame.
     return [{'start_ns': start - times[0], 'end_ns': end - times[0],
              'text': transitions[start]}
-            for start, end in zip(starts, starts[1:] + [times[-1]]) if end > start]
+            for start, end in zip(starts, starts[1:] + [times[-1] + 1]) if end > start]

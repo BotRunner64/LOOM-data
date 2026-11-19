@@ -1,4 +1,4 @@
-"""Convert dual-gripper RealOmin MCAPs, preserving each stream's native clock."""
+"""Convert dual-gripper RealOmin MCAPs, resampling their asynchronous streams to 30 fps."""
 from __future__ import annotations
 
 from functools import cached_property
@@ -11,7 +11,8 @@ from pathlib import Path
 from loom_data.video import VideoWriter
 from loom_data.sources.common import normalized_gripper
 from loom_data.geometry import eef_offset, pose_matrix, tool_transform
-from loom_data.contract import encode_pose, write_state, write_video_index
+from loom_data.contract import encode_pose, episode_record, write_frames
+from loom_data.sync import frame_grid
 from loom_data.sources.policy import SourceDataError, source_value
 
 from loom_data.sources.base import Source, task_limit
@@ -32,7 +33,7 @@ DEFAULT_GRIPPER_OPEN = 0.103
 DEFAULT_GRIPPER_CLOSED = 0.
 
 
-def messages(path, *, video=False):
+def messages(path, topics):
     from google.protobuf.message import DecodeError
     from mcap.exceptions import EndOfFile, InvalidMagic, RecordLengthLimitExceeded
     from mcap.reader import make_reader
@@ -40,7 +41,6 @@ def messages(path, *, video=False):
     try:
         with path.open('rb') as handle:
             reader = make_reader(handle, decoder_factories=[DecoderFactory()])
-            topics = list(CAMERAS if video else STATES)
             for _, channel, _, decoded in reader.iter_decoded_messages(topics=topics):
                 fields = decoded.DESCRIPTOR.fields_by_name if hasattr(decoded, 'DESCRIPTOR') else None
                 if fields is not None and 'header' not in fields:
@@ -112,8 +112,13 @@ def convert_episode(source, destination, transform=None,
     transform = tool_transform(DEFAULT_EEF_OFFSET, DEFAULT_TOOL_RPY) if transform is None else transform
     normalized_gripper(0., gripper_closed, gripper_open)
     state = {name: ([], []) for name in STATES.values()}
+    camera_times = {}
     # Source channel is authoritative: right-hand header.topic_name can say robot0.
-    for topic, timestamp, decoded in messages(Path(source['path'])):
+    # Camera acquisition times are read here too: the 30 fps frame times depend on every stream.
+    for topic, timestamp, decoded in messages(Path(source['path']), list(STATES) + list(CAMERAS)):
+        if topic in CAMERAS:
+            camera_times.setdefault(CAMERAS[topic], []).append(timestamp)
+            continue
         name = STATES[topic]
         if name.endswith('_eef'):
             if decoded.frame_id != 'world' or not decoded.HasField('pose'):
@@ -129,34 +134,32 @@ def convert_episode(source, destination, transform=None,
     for times, _ in state.values():
         if any(b < a for a, b in zip(times, times[1:])):
             raise SourceDataError('invalid_timestamp', 'Decreasing state acquisition timestamps')
-    videos = {}
-    (destination / 'rgb').mkdir(parents=True)
-    with ExitStack() as stack:
-        for topic, timestamp, decoded in messages(Path(source['path']), video=True):
-            camera = CAMERAS[topic]
-            if camera not in videos:
-                videos[camera] = VideoWriter(destination / 'rgb' / f'{camera}.mp4', decoded.format)
-                stack.callback(videos[camera].close)
-            videos[camera].add(decoded.data, timestamp, decoded.format)
-        if not videos:
-            raise SourceDataError('missing_rgb', 'Requires at least one RGB camera')
-        for writer in videos.values():
-            writer.finish()
-    streams = [t for t, _ in state.values()] + [v.timestamps for v in videos.values()]
+    if not camera_times:
+        raise SourceDataError('missing_rgb', 'Requires at least one RGB camera')
+    streams = [t for t, _ in state.values()] + [sorted(t) for t in camera_times.values()]
     origin, end = min(t[0] for t in streams), max(t[-1] for t in streams)
     if end <= origin:
         raise SourceDataError('invalid_timestamp', 'Zero-duration episode')
-    for name, (times, values) in state.items():
-        write_state(destination / 'state' / f'{name}.parquet', times, values, origin, pose=name.endswith('_eef'))
-    for camera, writer in videos.items():
-        write_video_index(destination / 'rgb' / f'{camera}.parquet', writer.timestamps, origin)
-    return {'episode_id': destination.name, 'cameras': sorted(videos),
-            'instructions': [{'start_ns': 0, 'end_ns': end-origin, 'text': source['instruction']}]}
+    grid = frame_grid(streams)
+    length = write_frames(destination, state,
+                          [{'start_ns': 0, 'end_ns': end-origin, 'text': source['instruction']}], origin, grid)
+    writers = {}
+    with ExitStack() as stack:
+        for topic, timestamp, decoded in messages(Path(source['path']), list(CAMERAS)):
+            camera = CAMERAS[topic]
+            if camera not in writers:
+                writers[camera] = VideoWriter(destination / f'{camera}.mp4', decoded.format,
+                                              camera_times[camera], grid)
+                stack.callback(writers[camera].close)
+            writers[camera].add(decoded.data, timestamp, decoded.format)
+        videos = {camera: writer.finish() for camera, writer in writers.items()}
+    return episode_record(destination.name, length, videos)
 
 
 class RealOmin(Source):
     name = 'realomin'
     policy = 'drop'
+    camera_sets = (('left_wrist', 'right_wrist'),)
     OPTIONS = {
         'eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),
                            help='mounting origin in source raw EE axes, metres (default: nominal V3 rear flange)'),

@@ -8,12 +8,12 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-from loom_data.video import copy_h264_video
-from loom_data.contract import seconds_to_ns, write_state, write_video_index
+from loom_data.contract import episode_record, seconds_to_ns, write_frames
+from loom_data.sync import table_grid
 from loom_data.sources.common import task_instructions
 from loom_data.robot.yam import YamFK
 from loom_data.sources.lerobot_v3 import LeRobotV3Reader, selected_cameras, subset_tasks, video_features
-from loom_data.video import extract_video_segment
+from loom_data.video import extract_video_segment, transcode_video
 
 from loom_data.sources.base import Source, task_limit
 
@@ -33,6 +33,12 @@ def validate_source(info):
     if state.get('shape') != [14] or state.get('names') != STATE_NAMES:
         raise ValueError('Unsupported MolmoAct2 observation.state layout')
     return video_features(CAMERAS, features)
+
+
+def declared_fps(info):
+    """The source's nominal frame rate, when its metadata states one."""
+    fps = info.get('fps')
+    return fps if isinstance(fps, (int, float)) and not isinstance(fps, bool) and fps > 0 else None
 
 
 def load_tasks(directory):
@@ -99,26 +105,24 @@ def read_rows(source, metadata, rows, tasks, annotated, fk):
     return times, streams, annotation, cameras
 
 
-def convert_episode(source, destination, tasks, annotated, fk):
+def convert_episode(source, destination, tasks, annotated, fk, fps=None):
     times, streams, annotation, cameras = read_episode(source, tasks, annotated, fk)
     return write_episode(source.name, destination, times, streams, annotation, cameras,
-                         lambda key, target: copy_h264_video(
-                             source / 'videos' / f'{key}.mp4', target, len(times)))
+                         lambda key, target, grid: transcode_video(
+                             source / 'videos' / f'{key}.mp4', target, times, grid), fps)
 
 
-def write_episode(episode_id, destination, times, streams, annotation, cameras, video):
-    # This source supplies one shared timestamp per recorded observation row.
-    # The segmented videos preserve that row order; container PTS are irrelevant.
-    for name, values in streams.items():
-        write_state(destination / 'state' / f'{name}.parquet', times, values, times[0],
-                    pose=name.endswith('_eef'))
+def write_episode(episode_id, destination, times, streams, annotation, cameras, video, fps=None):
+    # The source supplies one shared timestamp per recorded row, so state and images
+    # are already aligned. Rows pass through at a nominal 30 fps; otherwise they are resampled.
+    grid = table_grid(times, fps)
+    length = write_frames(destination, {name: (times, values) for name, values in streams.items()},
+                          annotation, times[0], grid)
+    videos = {}
     for key, camera in cameras.items():
         print(f'  {camera}', flush=True)
-        target = destination / 'rgb' / camera
-        video(key, target.with_suffix('.mp4'))
-        write_video_index(target.with_suffix('.parquet'), times, times[0])
-    return {'episode_id': episode_id, 'cameras': sorted(cameras.values()),
-            'instructions': annotation}
+        videos[camera] = video(key, destination / f'{camera}.mp4', grid)
+    return episode_record(episode_id, length, videos)
 
 
 class DatasetReader(LeRobotV3Reader):
@@ -138,13 +142,14 @@ class DatasetReader(LeRobotV3Reader):
         rows = self.read_rows(index)
         times, streams, annotation, cameras = read_rows(self.source, row, rows, self.tasks, self.annotated, fk)
         return write_episode(f'episode_{index:06d}', destination, times, streams, annotation, cameras,
-                             lambda key, target: extract_video_segment(
-                                 row['videos'][key], target, len(times), self.fps))
+                             lambda key, target, grid: extract_video_segment(
+                                 row['videos'][key], target, times, self.fps, grid), self.fps)
 
 
 class MolmoAct2(Source):
     name = 'molmoact2'
     model = 'yam'
+    camera_sets = (('left_wrist', 'right_wrist', 'top'),)
 
     @classmethod
     def discover(cls, config, progress):
@@ -183,11 +188,15 @@ class MolmoAct2(Source):
     def tasks(self):
         return load_tasks(self.root / 'source/meta')
 
+    @cached_property
+    def fps(self):
+        return declared_fps(json.loads((self.root / 'source/meta/info.json').read_text(encoding='utf-8')))
+
     def episode(self, task, destination):
         if task.get('layout') == 'lerobot_v3':
             return self.reader.convert_episode(task['index'], destination, self.fk)
         tasks, annotated = self.tasks
-        return convert_episode(Path(task['source']), destination, tasks, annotated, self.fk)
+        return convert_episode(Path(task['source']), destination, tasks, annotated, self.fk, self.fps)
 
 
 SOURCE = MolmoAct2

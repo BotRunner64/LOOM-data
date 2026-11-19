@@ -7,7 +7,9 @@ it stopped. State lives in a work directory beside the output:
     plan.json          frozen config, tasks and input fingerprints
     records/<id>.json  one committed or skipped episode
     errors/<id>.err    last failure of an unfinished episode
-    dataset/           committed episodes, renamed to the output by finalize
+    dataset/           committed (staged) episodes, one directory each
+    publish/           LeRobot v3 datasets, one per camera layout, built by finalize
+    published.json     written just before publish/ is renamed to the output
 """
 from __future__ import annotations
 
@@ -15,7 +17,6 @@ import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
-import json
 import os
 from pathlib import Path
 import re
@@ -27,8 +28,9 @@ import traceback
 from loom_data import contract, paths, resumable, sources
 from loom_data.convert import config as configuration
 from loom_data.convert.budget import sample_tasks
+from loom_data.sources.base import CONTRACT_DROPS
 from loom_data.resumable import (
-    StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, encoded, input_stamp,
+    StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, input_stamp,
     no_progress, progress, read_json, require_single_process, run_cli, run_workers, sync_directory,
     worker_diagnostics, worker_rank,
 )
@@ -83,11 +85,11 @@ class Store:
         if episode_id not in self.id_set:
             raise StateError(f'Unknown episode: {episode_id}')
         path = self.work / 'records' / f'{episode_id}.json'
-        directory = (self.output if published else self.dataset) / 'episodes' / episode_id
+        directory = self.dataset / 'episodes' / episode_id
         if path.is_symlink():
             raise StateError(f'{episode_id}: symlink recovery record')
         if not path.exists():
-            if directory.exists() or directory.is_symlink():
+            if not published and (directory.exists() or directory.is_symlink()):
                 raise StateError(f'{episode_id}: episode exists without record')
             return None
         record = read_json(path)
@@ -96,11 +98,12 @@ class Store:
             raise StateError(f'{episode_id}: recovery record belongs to a different plan')
         try:
             if record.get('outcome') == 'skipped':
-                if (not self.skips
+                layout = record.get('reason') in CONTRACT_DROPS
+                if ((not self.skips and not layout)
                         or not isinstance(record.get('reason'), str) or not record['reason'].strip()
-                        or directory.exists() or directory.is_symlink()):
+                        or (not published and (directory.exists() or directory.is_symlink()))):
                     raise ValueError('invalid skip record or unexpected episode directory')
-                if self.drops:
+                if self.drops and not layout:
                     reasons = record.get('reasons')
                     if (not isinstance(reasons, list) or not reasons or record['reason'] not in reasons
                             or any(not isinstance(r, str) or not r.strip() for r in reasons)
@@ -114,6 +117,8 @@ class Store:
             if (not isinstance(record.get('files'), dict) or not record['files']
                     or any(type(n) is not int or n <= 0 for n in record['files'].values())):
                 raise ValueError('invalid recorded file sizes')
+            if published:
+                return record
             if not directory.exists() and not directory.is_symlink():
                 return None
             if contract.file_sizes(directory, record['manifest']) != record['files']:
@@ -130,11 +135,11 @@ class Store:
         if record_names - {f'{i}.json' for i in self.ids}:
             raise StateError('Unexpected files in records directory')
         record_ids = {name[:-5] for name in record_names}
-        dataset = self.output if published else self.dataset
-        episodes = dataset / 'episodes'
-        if dataset.is_symlink() or episodes.is_symlink():
+        episodes = self.dataset / 'episodes'
+        if self.dataset.is_symlink() or episodes.is_symlink():
             raise StateError('Symlink dataset/episodes directory')
-        actual = {p.name for p in episodes.iterdir()} if episodes.exists() else set()
+        # A published dataset no longer has staged episodes; its records are the audit trail.
+        actual = {p.name for p in episodes.iterdir()} if episodes.exists() and not published else set()
         if actual - self.id_set:
             raise StateError('Unexpected episode directories')
         orphaned = actual - record_ids
@@ -184,17 +189,23 @@ class Store:
     def published(self, progress=no_progress):
         if not self.output.exists():
             return False
-        if self.dataset.exists():
-            raise StateError('Both published output and working dataset exist')
-        if {p.name for p in self.output.iterdir()} != {'episodes', 'episodes.jsonl'}:
-            raise StateError('Existing output is not a published dataset')
-        expected, _, _ = self.audit(published=True, complete=True, progress=progress)
-        try:
-            actual = [json.loads(line) for line in (self.output / 'episodes.jsonl').read_text().splitlines()]
-        except (ValueError, OSError) as exc:
-            raise StateError('Damaged published manifest') from exc
-        if actual != expected:
-            raise StateError('Published manifest differs from recovery records')
+        marker = self.work / 'published.json'
+        value = read_json(marker) if marker.is_file() else None
+        if not isinstance(value, dict) or value.get('plan_id') != self.plan['id'] \
+                or not isinstance(value.get('layouts'), dict):
+            raise StateError('Existing output was not published by this plan')
+        if {p.name for p in self.output.iterdir()} != set(value['layouts']):
+            raise StateError('Existing output is not the published dataset')
+        for name, counts in value['layouts'].items():
+            info = read_json(self.output / name / 'meta/info.json')
+            if (info.get('total_episodes'), info.get('total_frames')) != (counts['episodes'], counts['frames']):
+                raise StateError(f'Published dataset changed: {name}')
+        exported, _, _ = self.audit(published=True, complete=True, progress=progress)
+        if len(exported) != sum(counts['episodes'] for counts in value['layouts'].values()):
+            raise StateError('Published datasets differ from recovery records')
+        # Staged episodes survive only a crash between publication and cleanup.
+        if self.dataset.exists() and not self.dataset.is_symlink():
+            shutil.rmtree(self.dataset)
         return True
 
     def commit(self, episode_id, directory, manifest):
@@ -210,8 +221,7 @@ class Store:
         for name in sizes:
             with (directory / name).open('rb') as handle:
                 os.fsync(handle.fileno())
-        for folder in (directory / 'state', directory / 'rgb', directory):
-            sync_directory(folder)
+        sync_directory(directory)
         atomic_json(self.work / 'records' / f'{episode_id}.json',
                     {'plan_id': self.plan['id'], 'episode_id': episode_id,
                      'outcome': 'exported', 'manifest': manifest, 'files': sizes,
@@ -226,7 +236,7 @@ class Store:
         print(f'Committed {episode_id}', flush=True)
 
     def skip(self, episode_id, reason, *, detail='', reasons=None):
-        if not self.skips:
+        if not self.skips and reason not in CONTRACT_DROPS:
             raise StateError('This dataset has no legitimate skip policy')
         if self.state(episode_id) is not None:
             raise StateError(f'{episode_id}: already completed')
@@ -243,7 +253,7 @@ class Store:
         print(f'Skipped {episode_id}: {reason}', flush=True)
 
     def write_summary(self):
-        if self.drops:
+        if self.drops or self.statistics['dropped']:
             atomic_json(self.work / 'conversion_summary.json', self.statistics)
             s = self.statistics
             print(f"Conversion: {s['exported']} exported ({s['repaired']} repaired), "
@@ -255,6 +265,16 @@ class Store:
         message = f'{episode_id}\nInput: {source}\n' + ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         print(message, file=sys.stderr, flush=True)
         atomic_text(self.work / 'errors' / f'{episode_id}.err', message)
+
+
+def sync_tree(root):
+    """Flush a built dataset. Videos are links to files flushed when their episode was committed."""
+    for directory, _, files in os.walk(root):
+        if not Path(directory).relative_to(root).parts[:1] == ('videos',):
+            for name in files:
+                with open(Path(directory) / name, 'rb') as handle:
+                    os.fsync(handle.fileno())
+        sync_directory(directory)
 
 
 def validate_conversion(value):
@@ -319,6 +339,8 @@ def prepare(config, output):
         store.write_summary()
         print(f'Already complete: {output}', flush=True)
         return store
+    if (work / 'publish').exists() and not (work / 'publish').is_symlink():
+        shutil.rmtree(work / 'publish')
     for name in ('records', 'errors', 'logs', 'staging', 'dataset/episodes'):
         directory = work / name
         if directory.is_symlink():
@@ -404,16 +426,36 @@ def finalize(output):
             store.write_summary()
         raise
     store.write_summary()
-    print(f'Writing episodes.jsonl ({len(manifest)} episodes)...', file=sys.stderr, flush=True)
-    atomic_text(store.dataset / 'episodes.jsonl', ''.join(encoded(r) + '\n' for r in manifest))
+    if not manifest:
+        raise StateError('No episode was exported; nothing to publish')
+    # One LeRobot v3 dataset per camera layout, episodes in plan order.
+    layouts = {}
+    for record in manifest:
+        layouts.setdefault(contract.layout_name(record['cameras'], record['sizes']), []).append(record)
+    publish = store.work / 'publish'
+    if publish.is_symlink():
+        raise StateError('Symlink publish directory')
+    if publish.exists():
+        shutil.rmtree(publish)  # an interrupted finalize; staged episodes are still intact
+    summary = {}
+    for name, records in sorted(layouts.items()):
+        with progress(f'Building {name}', len(records), unit='episode') as bar:
+            info = contract.build_dataset(
+                publish / name, store.plan['config']['dataset'],
+                [(record, store.dataset / 'episodes' / record['episode_id']) for record in records], bar)
+        summary[name] = {'episodes': info['total_episodes'], 'frames': info['total_frames']}
+        print(f'Layout {name}: {info["total_episodes"]} episodes, {info["total_frames"]} frames', flush=True)
+    sync_tree(publish)
     if store.output.exists():
         raise StateError('Output appeared before publication')
-    print('Publishing dataset...', file=sys.stderr, flush=True)
+    print('Publishing datasets...', file=sys.stderr, flush=True)
+    atomic_json(store.work / 'published.json', {'plan_id': store.plan['id'], 'layouts': summary})
     store.output.parent.mkdir(parents=True, exist_ok=True)
-    store.dataset.rename(store.output)
+    publish.rename(store.output)
     sync_directory(store.output.parent)
     sync_directory(store.work)
-    print(f'Published {len(manifest)} episodes: {store.output}', flush=True)
+    shutil.rmtree(store.dataset)
+    print(f'Published {len(manifest)} episodes in {len(layouts)} layout(s): {store.output}', flush=True)
 
 
 def run_serial(config, output):

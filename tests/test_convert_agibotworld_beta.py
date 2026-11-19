@@ -8,43 +8,66 @@ from unittest.mock import patch
 import av
 import h5py
 import numpy as np
-import pyarrow.parquet as pq
 
-from support import assert_conversion_fails, convert
+from support import (assert_conversion_fails, convert, datasets, episode_errors, manifest, read_export,
+                     video_means, write_video)
+from loom_data.convert import job
 from loom_data.sources import agibotworld_beta as script
-from loom_data.geometry import tool_transform
-from loom_data.contract import validate_episode
+from loom_data.geometry import pose_matrix, tool_transform
+
+LAYOUT = 'top+left_wrist+right_wrist_640x480'
+GRAY_OFFSETS = {'top': 0, 'left_wrist': 20, 'right_wrist': 40}  # tells the cameras apart
+SEGMENTS = [{'start_frame': 0, 'end_frame': 1, 'action_text': 'Pick'},
+            {'start_frame': 1, 'end_frame': 2, 'action_text': 'Twist'}]
 
 
-def make_source(root):
-    state = root/'proprio_stats/694/123/proprio_stats.h5'
+def frame_grays(count):
+    return [round(i * 200 / (count - 1)) for i in range(count)]
+
+
+def make_source(root, episode=123, *, offsets=(0, 33_234_567, 66_765_432), end_position=None,
+                end_orientation=None, cameras=tuple(script.CAMERAS), size=(64, 48), segments=SEGMENTS):
+    """One Beta episode of task 694 under `root`; returns its state file.
+
+    The default is a convertible episode: three cameras, 4:3 video, and jittery
+    acquisition times at a nominal 30 fps (`offsets`, ns from the first row).
+    """
+    count = len(offsets)
+    state = root/f'proprio_stats/694/{episode}/proprio_stats.h5'
     state.parent.mkdir(parents=True)
     origin = 1_739_382_608_553_487_000
     with h5py.File(state, 'w') as h:
-        h['timestamp'] = np.array([origin, origin+31_234_567, origin+68_765_432], dtype='int64')
-        h['state/end/position'] = np.zeros((3, 2, 3))
-        h['state/end/orientation'] = np.tile([0., 0., 0., 1.], (3, 2, 1))
-        h['state/effector/position'] = np.array([[35., 120.], [77.5, 77.5], [120., 35.]])
-        h['state/robot/position'] = np.tile([1., 2., 0.], (3, 1))
-        h['state/robot/orientation'] = np.tile([0., 0., 0., 1.], (3, 1))
-    video = root/'observations/694/123/videos/head_color.mp4'
-    video.parent.mkdir(parents=True)
-    with av.open(str(video), 'w') as writer:
-        stream = writer.add_stream('libx264', rate=30)
-        stream.width = stream.height = 32
-        stream.pix_fmt = 'yuv420p'
-        stream.codec_context.thread_count = 1
-        for i in range(3):
-            frame = av.VideoFrame.from_ndarray(np.full((32,32,3), i*80, dtype='uint8'), format='rgb24')
-            for packet in stream.encode(frame):writer.mux(packet)
-        for packet in stream.encode():writer.mux(packet)
-    annotation = {'episode_id': 123, 'task_name': 'Twist cap', 'label_info': {'action_config': [
-        {'start_frame': 0, 'end_frame': 1, 'action_text': 'Pick'},
-        {'start_frame': 1, 'end_frame': 2, 'action_text': 'Twist'},
-    ]}}
-    (root/'task_info').mkdir()
-    (root/'task_info/task_694.json').write_text(json.dumps([annotation]))
+        h['timestamp'] = np.array([origin + offset for offset in offsets], dtype='int64')
+        h['state/end/position'] = np.zeros((count, 2, 3)) if end_position is None else np.asarray(end_position, float)
+        h['state/end/orientation'] = (np.tile([0., 0., 0., 1.], (count, 2, 1)) if end_orientation is None
+                                      else np.asarray(end_orientation, float))
+        # Left closes (35 -> 120) while right opens.
+        h['state/effector/position'] = np.column_stack((np.linspace(35., 120., count), np.linspace(120., 35., count)))
+        h['state/robot/position'] = np.tile([1., 2., 0.], (count, 1))
+        h['state/robot/orientation'] = np.tile([0., 0., 0., 1.], (count, 1))
+    for name in cameras:
+        write_video(root/f'observations/694/{episode}/videos/{name}',
+                    [g + GRAY_OFFSETS[script.CAMERAS[name]] for g in frame_grays(count)], size=size)
+    annotation = {'episode_id': episode, 'task_name': 'Twist cap', 'label_info': {'action_config': segments}}
+    path = root/'task_info/task_694.json'
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps((json.loads(path.read_text()) if path.exists() else []) + [annotation]))
     return state
+
+
+def skips(output):
+    """Episode id -> recorded reason of every episode a conversion left out."""
+    records = [json.loads(p.read_text()) for p in sorted((job.work_directory(output)/'records').glob('*.json'))]
+    return {r['episode_id']: r['reason'] for r in records if r['outcome'] == 'skipped'}
+
+
+def expected_pose(position, degrees, side):
+    """Contract pose of a flange at `position`, turned `degrees` about z, on the fixture's base at (1, 2, 0)."""
+    half = math.radians(degrees) / 2
+    flange = pose_matrix(position, [0., 0., math.sin(half), math.cos(half)])
+    tool = tool_transform(script.DEFAULT_EEF_OFFSET, getattr(script, f'DEFAULT_{side.upper()}_TOOL_RPY'))
+    transform = pose_matrix([1., 2., 0.], [0., 0., 0., 1.]) @ flange @ tool
+    return np.concatenate((transform[:3, 3], transform[:3, :3].T.reshape(-1)))
 
 
 class BetaMappingTests(unittest.TestCase):
@@ -85,12 +108,16 @@ class BetaMappingTests(unittest.TestCase):
             {'start_frame': 1, 'end_frame': 3, 'action_text': 'Pick'},
         ]}}
         times = [1000, 1031, 1068, 1102]
+        # The segment covers frames 1 and 2; frame 3, the last one, falls back to the task.
         self.assertEqual(script.instructions(row,times), [
             {'start_ns':0,'end_ns':31,'text':'Whole task'},
             {'start_ns':31,'end_ns':102,'text':'Pick'},
+            {'start_ns':102,'end_ns':103,'text':'Whole task'},
         ])
         row['label_info']['action_config'][0]['end_frame']=4
-        self.assertEqual(script.instructions(row,times)[-1]['end_ns'],102)
+        self.assertEqual(script.instructions(row,times)[-1], {'start_ns':31,'end_ns':102,'text':'Pick'})
+        self.assertEqual(script.instructions({'task_name': 'Whole task'},times),
+                         [{'start_ns':0,'end_ns':102,'text':'Whole task'}])
         row['label_info']['action_config'].append({'start_frame':2,'end_frame':3,'action_text':'Overlap'})
         with self.assertRaisesRegex(ValueError,'Overlapping'):
             script.instructions(row,times)
@@ -104,21 +131,91 @@ class BetaMappingTests(unittest.TestCase):
 
 
 class BetaExportTests(unittest.TestCase):
-    def test_real_media_schema_video_count_and_precision(self):
+    def assert_video(self, episode, frames, size=(640, 480)):
+        """Every camera shows source frame `frames[k]` at frame k."""
+        grays = frame_grays(max(frames) + 1)
+        for camera, (path, first) in episode['videos'].items():
+            with av.open(str(path)) as reader:
+                self.assertEqual(len(reader.streams), 1)
+                stream = reader.streams.video[0]
+                self.assertEqual((stream.codec_context.name, stream.codec_context.pix_fmt), ('h264', 'yuv420p'))
+                self.assertEqual((stream.width, stream.height, stream.average_rate), (*size, 30))
+            np.testing.assert_allclose(video_means(path, first, episode['length']),
+                                       [grays[i] + GRAY_OFFSETS[camera] for i in frames], atol=4)
+            self.assertEqual(len(video_means(path)), episode['length'])
+
+    def test_nominal_30_fps_rows_pass_through_one_to_one(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);make_source(root/'raw')
             (root/'raw/observations/694/123/videos/back_left_fisheye_color.mp4').write_bytes(b'unused')
             convert('agibotworld_beta', root/'raw',root/'out')
-            record=json.loads((root/'out/episodes.jsonl').read_text())
-            destination=root/'out/episodes'/record['episode_id']
-            validate_episode(destination,record)
+            self.assertEqual(list(datasets(root/'out')), [LAYOUT])
+            dataset = datasets(root/'out')[LAYOUT]
+            self.assertEqual((dataset.info['codebase_version'], dataset.info['fps']), ('v3.0', 30))
+            episode, = read_export(root/'out')
+            self.assertEqual((episode['episode_id'], episode['length']), ('task_694_episode_123', 3))
+            self.assertEqual(sorted(episode['cameras']), ['left_wrist', 'right_wrist', 'top'])
+            # The jittery acquisition times (31.2 / 37.5 ms steps) are dropped: row k is frame k.
             for side in ('left', 'right'):
-                values = pq.read_table(destination / 'state' / f'{side}_eef.parquet')['pose'].to_pylist()
-                np.testing.assert_allclose(np.array(values)[:, :3], [[1., 2., 0.]] * 3)
-            for kind in ('state/left_eef','rgb/top'):
-                self.assertEqual(pq.read_table(destination/f'{kind}.parquet')['timestamp_ns'].to_pylist(),[0,31_234_567,68_765_432])
-            self.assertEqual(pq.read_table(destination/'state/left_gripper.parquet')['openness'].to_pylist(),[1.,.5,0.])
-            self.assertEqual(record['instructions'][0]['end_ns'],31_234_567)
+                np.testing.assert_allclose(episode[f'{side}_eef'], [expected_pose([0, 0, 0], 0, side)] * 3,
+                                           atol=1e-6, rtol=0)
+            np.testing.assert_allclose(episode['left_gripper'], [1., .5, 0.], atol=1e-7, rtol=0)
+            np.testing.assert_allclose(episode['right_gripper'], [0., .5, 1.], atol=1e-7, rtol=0)
+            # Segments cover frames 0 and 1; the uncovered last frame falls back to the task name.
+            self.assertEqual(episode['tasks'], ['Pick', 'Twist', 'Twist cap'])
+            self.assertEqual(episode['instructions'], [
+                {'start_ns': 0, 'end_ns': 33_333_333, 'text': 'Pick'},
+                {'start_ns': 33_333_333, 'end_ns': 66_666_667, 'text': 'Twist'},
+                {'start_ns': 66_666_667, 'end_ns': 66_666_667, 'text': 'Twist cap'}])
+            self.assert_video(episode, [0, 1, 2])
+
+    def test_rows_at_another_rate_are_resampled_by_acquisition_time(self):
+        # No declared rate: a 15 fps median row interval sends the episode through resampling.
+        angles = [0., 30., 60., 90.]
+        left = [[.1 * i, 0., 0.] for i in range(4)]
+        right = [[0., .2 * i, .3] for i in range(4)]
+        half = [math.radians(a) / 2 for a in angles]
+        orientation = [[[0., 0., math.sin(h), math.cos(h)]] * 2 for h in half]
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            make_source(root/'raw', offsets=(0, 66_666_667, 133_333_333, 200_000_000),
+                        end_position=np.stack((left, right), axis=1), end_orientation=orientation, size=(64, 36))
+            convert('agibotworld_beta', root/'raw',root/'out')
+            self.assertEqual(list(datasets(root/'out')), ['top+left_wrist+right_wrist_640x360'])
+            episode, = read_export(root/'out')
+            self.assertEqual(episode['length'], 7)
+            for side, positions in (('left', left), ('right', right)):
+                # Frames 0, 2, 4, 6 sit on source rows; the odd ones are half-way in position and angle.
+                expected = [expected_pose(np.add(positions[k // 2], positions[(k + 1) // 2]) / 2, 15. * k, side)
+                            for k in range(7)]
+                np.testing.assert_allclose(episode[f'{side}_eef'], expected, atol=1e-6, rtol=0)
+            np.testing.assert_allclose(episode['left_gripper'], np.linspace(1., 0., 7), atol=1e-6, rtol=0)
+            np.testing.assert_allclose(episode['right_gripper'], np.linspace(0., 1., 7), atol=1e-6, rtol=0)
+            # Source rows are Pick, Twist, task, task; each holds for two frames.
+            self.assertEqual(episode['tasks'], ['Pick', 'Pick', 'Twist', 'Twist'] + ['Twist cap'] * 3)
+            # Frames midway between two source frames repeat the earlier one.
+            self.assert_video(episode, [0, 0, 1, 1, 2, 2, 3], (640, 360))
+
+    def test_a_hole_in_resampled_rows_is_dropped_as_a_sampling_gap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);make_source(root/'raw')
+            # 15 fps rows with a 333 ms hole: no state to interpolate and no RGB frame near those frames.
+            make_source(root/'raw', 124, offsets=[i * 66_666_667 for i in (0, 1, 2, 3, 8, 9, 10, 11)])
+            convert('agibotworld_beta', root/'raw',root/'out')
+            self.assertEqual(skips(root/'out'), {'task_694_episode_124': 'sampling_gap'})
+            self.assertEqual(manifest(root/'out'), [{'episode_id': 'task_694_episode_123'}])
+            summary = json.loads((root/'out.work/conversion_summary.json').read_text())
+            self.assertEqual(summary['drop_reasons'], {'sampling_gap': 1})
+
+    def test_other_camera_sets_are_skipped_as_unsupported_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);make_source(root/'raw')
+            make_source(root/'raw', 124, cameras=('head_color.mp4', 'hand_left_color.mp4'))  # no right wrist
+            convert('agibotworld_beta', root/'raw',root/'out')
+            self.assertEqual(skips(root/'out'), {'task_694_episode_124': 'unsupported_layout'})
+            self.assertEqual(episode_errors(root/'out'), '')
+            self.assertEqual(list(datasets(root/'out')), [LAYOUT])
+            self.assertEqual(manifest(root/'out'), [{'episode_id': 'task_694_episode_123'}])
 
     def test_dexhands_invalid_times_and_nonfinite_state_are_rejected(self):
         for invalid in ('dexhand','timestamp','nonfinite'):
@@ -139,6 +236,12 @@ class BetaExportTests(unittest.TestCase):
             self.assertIn('frame mismatch', (root/'out.work/errors/task_694_episode_123.err').read_text())
             self.assertFalse((root/'out').exists())
 
+    def test_an_unregistered_aspect_ratio_fails_instead_of_being_dropped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);make_source(root/'raw', size=(32, 32))
+            assert_conversion_fails(self, 'Aspect ratio 1:1', 'agibotworld_beta', root/'raw',root/'out')
+            self.assertEqual(skips(root/'out'), {})
+
     def test_parallel_adapter_publishes_and_resumes(self):
         from loom_data.convert import job as parallel
         from loom_data.convert.config import make_config
@@ -152,8 +255,7 @@ class BetaExportTests(unittest.TestCase):
             with patch.object(script,'convert_episode',side_effect=AssertionError('must skip committed episode')):
                 self.assertEqual(parallel.worker(root/'out',0,1),0)
             parallel.finalize(root/'out')
-            record=json.loads((root/'out/episodes.jsonl').read_text())
-            self.assertEqual(record['episode_id'],'task_694_episode_123')
+            self.assertEqual(manifest(root/'out'), [{'episode_id': 'task_694_episode_123'}])
 
 
 if __name__=='__main__':unittest.main()

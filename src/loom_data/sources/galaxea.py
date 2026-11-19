@@ -8,7 +8,8 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from loom_data.geometry import pose_matrix
-from loom_data.contract import seconds_to_ns, write_state, write_video_index
+from loom_data.contract import episode_record, seconds_to_ns, write_frames
+from loom_data.sync import table_grid
 from loom_data.video import transcode_video
 from loom_data.robot.kinematics import fk_poses
 from loom_data.robot.urdf_model import Robot, parse_urdf
@@ -171,6 +172,10 @@ def instruction_segments(times, fine_indices, coarse_indices, tasks):
             output[-1]['end_ns'] = end
         else:
             output.append({'start_ns': start, 'end_ns': end, 'text': texts[i]})
+    # The last row has no following row. Its label still holds on its own frame.
+    if not output or output[-1]['text'] != texts[-1]:
+        end = times[-1] - times[0]
+        output.append({'start_ns': end, 'end_ns': end + 1, 'text': texts[-1]})
     return output
 
 
@@ -250,17 +255,16 @@ def convert_episode(directory, index, metadata, tasks, kinematics, info, destina
     if prepared is None:
         return None
     times, values, instructions = prepared
-    for name, samples in values.items():
-        write_state(destination / 'state' / f'{name}.parquet', times, samples, times[0],
-                    pose=name.endswith('_eef'))
-    rgb = destination / 'rgb'
-    rgb.mkdir()
+    # Rows are frame-aligned at the source rate (15 fps locally); resample unless it is 30 fps.
+    fps = info.get('fps')
+    grid = table_grid(times, fps if isinstance(fps, (int, float)) and not isinstance(fps, bool) and fps > 0 else None)
+    length = write_frames(destination, {name: (times, samples) for name, samples in values.items()},
+                          instructions, times[0], grid)
+    videos = {}
     for key, camera in sorted(cameras.items()):
         video = source_path(directory, info['video_path'], index, chunks_size, key)
-        transcode_video(video, rgb / f'{camera}.mp4', len(times))
-        write_video_index(rgb / f'{camera}.parquet', times, times[0])
-    return {'episode_id': destination.name, 'cameras': sorted(cameras.values()),
-            'instructions': instructions}
+        videos[camera] = transcode_video(video, destination / f'{camera}.mp4', times, grid)
+    return episode_record(destination.name, length, videos)
 
 
 def discover_tasks(source):
@@ -277,6 +281,7 @@ class Galaxea(Source):
     model = ''  # the parent of galaxea_r1lite/ and galaxea_r1pro/
     policy = 'skip'
     skip_reason = 'Galaxea chassis commands do not meet the stationary selection rule'
+    camera_sets = (('left_wrist', 'right_wrist', 'top'),)
     OPTIONS = {
         'robot_type': dict(choices=tuple(DEFAULT_EEF_OFFSETS), help='only convert this embodiment'),
         'r1lite_eef_offset': dict(type=float, nargs=3, metavar=('X', 'Y', 'Z'),

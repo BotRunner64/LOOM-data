@@ -75,4 +75,10 @@ EEF 原点采用源法兰的安装基准，`p_flange_eef = [0,0,0] m`；保留�
 
 导出 state 在固定参考系，`top_head` 却是移动相机。第 1 集源外参每 10 帧抽样显示，相机相对首帧最大平移约 `0.47 m`、旋转约 `91°`。viewer 手动调整一次视角只能对齐某一时刻；严格图像对齐需要每帧的相机外参和内参。目标契约不包含这些标定，当前 viewer 也未按源相机运动驱动观察视角。不能将 state 改成随动头部系来消除这一差异，那会违反固定参考系要求。
 
-所有 state 与 RGB 均使用源 Parquet 的 `timestamp` 列，转为纳秒并共享本集共同零点，不按视频 FPS 推算。`top_head`、`hand_left`、`hand_right` 分别导出为 `top`、`left_wrist`、`right_wrist`。入选的 RGB 视频逐帧解码后用 libx264 编成无音轨 H.264；深度视频不导出。源视频每集每路必须与 Parquet 行数一致。`default` 指令分段按源帧边界映射到源时间戳；缺口用整集任务文本填充。
+#### 同步、视频与布局
+
+源是逐帧对齐的 LeRobot 帧表：每行一个共同的 `timestamp`，各路视频的第 `i` 帧对应第 `i` 行。`info.json` 的 `fps` 为 30（误差 1% 内）时按行透传，第 `k` 行即第 `k` 帧，时间改写为 `k/30`；否则按行时间戳重采样到 30 fps（契约第 3 节）。
+
+`top_head`、`hand_left`、`hand_right` 分别导出为 `top`、`left_wrist`、`right_wrist`。入选的 RGB 视频逐帧解码，缩放到契约分辨率后用 libx264 编成无音轨 H.264；深度视频不导出。源视频每集每路必须与 Parquet 行数一致。`default` 指令分段按源帧边界落到帧上；缺口用整集任务文本填充。
+
+允许的布局只有一种相机集合：`top`、`left_wrist`、`right_wrist` 三路齐全。缺任何一路的 episode 不导出，记为 `unsupported_layout`。

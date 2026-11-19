@@ -1,5 +1,4 @@
 import json
-from fractions import Fraction
 from pathlib import Path
 import shutil
 import tempfile
@@ -11,19 +10,26 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import MODELS, assert_conversion_fails, convert
+from support import (MODELS, assert_conversion_fails, convert, datasets, manifest, read_export, video_means,
+                     write_video)
 from loom_data.sources import molmoact2 as script
 from loom_data.robot.kinematics import fk_poses
 from loom_data.robot.urdf_model import parse_urdf
+from test_convert_hifi_umi import (assert_contract_video, frame_bracket, interpolated_pose, rewrite, row_times,
+                                   skip_record)
 
 MODEL = MODELS / 'yam'
+LAYOUT = 'top+left_wrist+right_wrist_640x480'
+JOINTS = {'left': [.2, -.3, .5, -.6, .4, .1], 'right': [-.1, .4, -.2, .5, -.3, .6]}
+OPENED = {'left': [0, .25, 1, 1], 'right': [1, .75, .5, 0]}  # the fixture's gripper values, clipped to [0,1]
 
 
-def make_source(root, frames=4):
+def make_source(root, frames=4, fps=30):
+    """One-episode downloader subset: 4 rows at `fps`, `frames` video frames per camera."""
     meta = root / 'source/meta'
     meta.mkdir(parents=True)
     (meta / 'info.json').write_text(json.dumps({
-        'robot_type': 'bi_yam_follower', 'codebase_version': 'v3.0',
+        'robot_type': 'bi_yam_follower', 'codebase_version': 'v3.0', 'fps': fps,
         'features': {'observation.state': {'shape': [14], 'names': script.STATE_NAMES},
                      **{key: {'dtype': 'video'} for key in script.CAMERAS}},
     }))
@@ -35,11 +41,11 @@ def make_source(root, frames=4):
     (episode / 'videos').mkdir(parents=True)
     pq.write_table(pa.table({
         'observation.state': pa.array([
-            [.2, -.3, .5, -.6, .4, .1, a, -.1, .4, -.2, .5, -.3, .6, b]
+            [*JOINTS['left'], a, *JOINTS['right'], b]
             for a, b in zip([-.1, .25, 1.2, 1], [1, .75, .5, 0])],
             type=pa.list_(pa.float32(), 14)),
-        # Nonzero origin, irregular intervals; container FPS must not determine time.
-        'timestamp': pa.array([2., 2.031, 2.079, 2.141], type=pa.float32()),
+        # Nonzero origin: the exported clock starts at frame 0, not at the source time.
+        'timestamp': pa.array(row_times(4, fps), type=pa.float32()),
         'frame_index': [0, 1, 2, 3], 'episode_index': [7] * 4,
         'index': [100, 101, 102, 103], 'task_index': [0, 0, 3, 3],
         'action': [[float('nan')] * 14] * 4,
@@ -51,28 +57,18 @@ def make_source(root, frames=4):
                    for i, key in enumerate(script.CAMERAS)},
     }))
     for key in script.CAMERAS:
-        with av.open(str(episode / 'videos' / f'{key}.mp4'), 'w') as output:
-            stream = output.add_stream('libx264', rate=25)
-            stream.width = stream.height = 32
-            stream.pix_fmt = 'yuv420p'
-            for i in range(frames):
-                frame = av.VideoFrame.from_ndarray(np.full((32, 32, 3), i * 60, np.uint8), format='rgb24')
-                frame.pts = i
-                for packet in stream.encode(frame):
-                    output.mux(packet)
-            for packet in stream.encode():
-                output.mux(packet)
+        write_video(episode / 'videos' / f'{key}.mp4', [i * 60 for i in range(frames)], rate=fps)
     return episode
 
 
-def make_full_source(root, video_frames=12):
+def make_full_source(root, video_frames=12, fps=25):
     """Three episodes, two frame files, and AV1 camera streams with different offsets."""
     with tempfile.TemporaryDirectory() as directory:
         subset = Path(directory)
-        episode = make_source(subset)
+        episode = make_source(subset, fps=fps)
         shutil.copytree(subset / 'source/meta', root / 'meta')
         info = json.loads((root / 'meta/info.json').read_text())
-        info.update(fps=25, total_episodes=3,
+        info.update(fps=fps, total_episodes=3,
                     data_path='data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet',
                     video_path='videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4')
         (root / 'meta/info.json').write_text(json.dumps(info))
@@ -89,8 +85,8 @@ def make_full_source(root, video_frames=12):
                    'data/chunk_index': 2, 'data/file_index': 3 if number < 2 else 4}
             for camera_number, key in enumerate(script.CAMERAS):
                 row.update({f'videos/{key}/chunk_index': 2, f'videos/{key}/file_index': 5,
-                            f'videos/{key}/from_timestamp': (number * 4 + camera_number) / 25,
-                            f'videos/{key}/to_timestamp': ((number + 1) * 4 + camera_number) / 25})
+                            f'videos/{key}/from_timestamp': (number * 4 + camera_number) / fps,
+                            f'videos/{key}/to_timestamp': ((number + 1) * 4 + camera_number) / fps})
             metadata.append(row)
         for file_index, data in ((3, pa.concat_tables(tables[:2])), (4, tables[2])):
             path = root / f'data/chunk-002/file-{file_index:03d}.parquet'
@@ -103,52 +99,83 @@ def make_full_source(root, video_frames=12):
         pq.write_table(pa.table({'episode_index': [7, 8, 9], 'task': ['整理杯子', None, ' ']}),
                        root / 'meta/tasks_annotated.parquet')
         for camera_number, key in enumerate(script.CAMERAS):
-            path = root / f'videos/{key}/chunk-002/file-005.mp4'
-            path.parent.mkdir(parents=True)
-            with av.open(str(path), 'w') as output:
-                stream = output.add_stream('libsvtav1', rate=25)
-                stream.width = stream.height = 64
-                stream.pix_fmt = 'yuv420p'
-                stream.thread_count = 1
-                stream.options = {'preset': '13', 'crf': '30', 'svtav1-params': 'lp=1'}
-                for i in range(video_frames + camera_number):
-                    value = max(0, i - camera_number) * 20
-                    frame = av.VideoFrame.from_ndarray(np.full((64, 64, 3), value, np.uint8), format='rgb24')
-                    frame.pts, frame.time_base = i, Fraction(1, 25)
-                    for packet in stream.encode(frame):
-                        output.mux(packet)
-                for packet in stream.encode():
-                    output.mux(packet)
+            # Each camera's stream starts `camera_number` frames late, so the cuts differ per camera.
+            write_video(root / f'videos/{key}/chunk-002/file-005.mp4',
+                        [max(0, i - camera_number) * 20 for i in range(video_frames + camera_number)],
+                        rate=fps, codec='libsvtav1',
+                        options={'preset': '13', 'crf': '30', 'svtav1-params': 'lp=1'})
     return root
+
+
+def expected_pose(model, side, joints):
+    """Independent FK: remove the world mounting and apply the contract axes at the mounting origin."""
+    transforms = fk_poses(model, {f'arm_{side}_joint{i + 1}': value for i, value in enumerate(joints)})
+    wrist = np.linalg.inv(transforms[f'arm_{side}_base_link']) @ transforms[f'arm_{side}_link6']
+    return np.r_[wrist[:3, 3], wrist[:3, 2], wrist[:3, 0], wrist[:3, 1]]
 
 
 class MolmoAct2Tests(unittest.TestCase):
     @unittest.skipUnless(MODEL.exists() and 'libsvtav1' in av.codecs_available, 'YAM assets and AV1 encoder required')
     def test_full_dataset_av1_cuts_camera_offsets_annotations_and_limit(self):
+        model = parse_urdf(MODEL / 'robot.urdf')
+        # Source frame of each exported frame: 30 fps rows pass through one to one. 25 fps rows are
+        # resampled: frames at 0, 33.3, 66.7, 100 ms take the nearest of the rows at 0, 40, 80, 120 ms,
+        # and the tie at 100 ms goes to the earlier one.
+        for fps, picked, tasks in ((30, [0, 1, 2, 3], ['拿起杯子', '拿起杯子', 'Put down', 'Put down']),
+                                   (25, [0, 1, 2, 2], ['拿起杯子', '拿起杯子', '拿起杯子', 'Put down'])):
+            with self.subTest(fps=fps), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = make_full_source(root / 'raw', fps=fps)
+                convert('molmoact2', source, root / 'out', limit=2)
+                self.assertEqual(list(datasets(root / 'out')), [LAYOUT])
+                episodes = read_export(root / 'out')
+                self.assertEqual([e['episode_id'] for e in episodes], ['episode_000007', 'episode_000008'])
+                # Episode 7 has a valid annotation; episode 8's is null, so its per-row tasks are used.
+                self.assertEqual(episodes[0]['tasks'], ['整理杯子'] * 4)
+                self.assertEqual(episodes[1]['tasks'], tasks)
+                seconds = row_times(4, fps).astype(np.float64)
+                frames = seconds[0] + np.arange(4) / 30
+                for number, episode in enumerate(episodes):
+                    self.assertEqual(episode['length'], 4)
+                    for side in ('left', 'right'):
+                        np.testing.assert_allclose(episode[f'{side}_eef'],
+                                                   [expected_pose(model, side, JOINTS[side])] * 4, atol=1e-6)
+                        expected = OPENED[side] if fps == 30 else np.interp(frames, seconds, OPENED[side])
+                        np.testing.assert_allclose(episode[f'{side}_gripper'], expected, atol=1e-6)
+                    for camera in script.CAMERAS.values():
+                        path, first = episode['videos'][camera]
+                        assert_contract_video(self, path, 4)
+                        np.testing.assert_allclose(video_means(path, first, 4),
+                                                   (np.array(picked) + number * 4) * 20, atol=4)
+
+    @unittest.skipUnless(MODEL.exists() and 'libsvtav1' in av.codecs_available, 'YAM assets and AV1 encoder required')
+    def test_full_dataset_episode_missing_a_camera_is_skipped_as_unsupported_layout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = make_full_source(root / 'raw')
-            convert('molmoact2', source, root / 'out', limit=2)
-            records = [json.loads(line) for line in (root / 'out/episodes.jsonl').read_text().splitlines()]
-            self.assertEqual([r['episode_id'] for r in records], ['episode_000007', 'episode_000008'])
-            self.assertEqual(records[0]['instructions'][0]['text'], '整理杯子')
-            self.assertEqual([r['text'] for r in records[1]['instructions']], ['拿起杯子', 'Put down'])
-            for number, record in enumerate(records):
-                exported = root / 'out/episodes' / record['episode_id']
-                times = pq.read_table(exported / 'state/left_eef.parquet')['timestamp_ns'].to_pylist()
-                expected_times = [script.seconds_to_ns(t) - 2_000_000_000 for t in
-                                  np.array([2., 2.031, 2.079, 2.141], dtype=np.float32)]
-                self.assertEqual(times, expected_times)
-                for camera in script.CAMERAS.values():
-                    path = exported / 'rgb' / f'{camera}.mp4'
-                    with av.open(str(path)) as video:
-                        self.assertEqual(video.streams.video[0].codec_context.name, 'h264')
-                        self.assertEqual(len(video.streams.audio), 0)
-                        frames = list(video.decode(video=0))
-                    self.assertEqual(len(frames), 4)
-                    np.testing.assert_allclose([f.to_ndarray(format='rgb24').mean() for f in frames],
-                                               np.arange(number * 4, number * 4 + 4) * 20, atol=4)
-                    self.assertEqual(pq.read_table(path.with_suffix('.parquet'))['timestamp_ns'].to_pylist(), times)
+            metadata = source / 'meta/episodes/chunk-001/file-000.parquet'  # holds episode 9 only
+            table = pq.read_table(metadata)
+            omit = [name for name in table.column_names if name.startswith('videos/observation.images.top/')]
+            pq.write_table(table.drop(omit), metadata)
+            convert('molmoact2', source, root / 'out')
+            self.assertEqual(list(datasets(root / 'out')), [LAYOUT])
+            self.assertEqual(manifest(root / 'out'), [{'episode_id': 'episode_000007'}, {'episode_id': 'episode_000008'}])
+            record = skip_record(root / 'out', 'episode_000009')
+            self.assertEqual((record['outcome'], record['reason']), ('skipped', 'unsupported_layout'))
+            self.assertIn('left_wrist+right_wrist', record['detail'])
+
+    @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
+    def test_subset_episode_with_another_camera_set_is_skipped_not_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            episode = make_source(root / 'raw')
+            metadata = json.loads((episode / 'episode.json').read_text())
+            del metadata['videos']['observation.images.left']
+            (episode / 'episode.json').write_text(json.dumps(metadata))
+            # The only episode is left out, so there is nothing to publish; the reason is on record.
+            assert_conversion_fails(self, 'No episode was exported', 'molmoact2', root / 'raw', root / 'out')
+            record = skip_record(root / 'out', episode.name, published=False)
+            self.assertEqual((record['outcome'], record['reason']), ('skipped', 'unsupported_layout'))
 
     @unittest.skipUnless('libsvtav1' in av.codecs_available, 'AV1 encoder required')
     def test_full_dataset_reads_shared_data_once_and_switches_files(self):
@@ -168,52 +195,122 @@ class MolmoAct2Tests(unittest.TestCase):
             root = Path(directory)
             source = make_full_source(root / 'raw', video_frames=11)
             assert_conversion_fails(self, 'expected 4 frames, decoded 3', 'molmoact2', source, root / 'out')
-            self.assertFalse((root / 'out').exists())
 
     @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
-    def test_full_export_schema_state_time_annotations_and_video(self):
+    def test_30_fps_subset_passes_rows_through_into_a_lerobot_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             episode = make_source(root / 'raw')
             convert('molmoact2', root / 'raw', root / 'out')
-            records = [json.loads(line) for line in (root / 'out/episodes.jsonl').read_text().splitlines()]
-            self.assertEqual(len(records), 1)
-            record = records[0]
-            exported = root / 'out/episodes' / episode.name
+            self.assertEqual(sorted(p.name for p in (root / 'out').iterdir()), [LAYOUT])
+            dataset = datasets(root / 'out')[LAYOUT]
+            self.assertEqual((dataset.info['codebase_version'], dataset.info['fps'], dataset.info['total_frames']),
+                             ('v3.0', 30, 4))
+            self.assertNotIn('action', dataset.info['features'])
+            table = pq.read_table(dataset.data_path(dataset.episodes[0]))
+            self.assertEqual(table.schema.field('observation.state').type, pa.list_(pa.float32(), 26))
+            self.assertEqual(table['frame_index'].to_pylist(), [0, 1, 2, 3])
+            # Frame k is at k / 30 s: the source's own clock (starting at 2 s) is not carried over.
+            np.testing.assert_allclose(table['timestamp'].to_pylist(), np.arange(4) / 30, atol=1e-7)
+            episodes = read_export(root / 'out')
+            self.assertEqual(len(episodes), 1)
+            exported = episodes[0]
+            self.assertEqual((exported['episode_id'], exported['length']), (episode.name, 4))
+            self.assertEqual(exported['cameras'], ['left_wrist', 'right_wrist', 'top'])
+            # The episode annotation replaces the per-row tasks and the stale cached text.
+            self.assertEqual(exported['tasks'], ['整理杯子'] * 4)
             source = pq.read_table(episode / 'data.parquet').to_pydict()
-            times = [script.seconds_to_ns(t) - 2_000_000_000 for t in source['timestamp']]
-            self.assertEqual(record, {'episode_id': episode.name, 'cameras': ['left_wrist', 'right_wrist', 'top'],
-                                     'instructions': [{'start_ns': 0, 'end_ns': times[-1], 'text': '整理杯子'}]})
             model = parse_urdf(MODEL / 'robot.urdf')
-            for side, offset, grips in [('left', 0, [0, .25, 1, 1]), ('right', 7, [1, .75, .5, 0])]:
-                poses = pq.read_table(exported / 'state' / f'{side}_eef.parquet')
-                self.assertEqual(poses['timestamp_ns'].to_pylist(), times)
-                self.assertEqual(poses.schema.field('pose').type, pa.list_(pa.float64(), 12))
-                self.assertFalse(poses.schema.field('pose').nullable)
-                # Independent expected FK: remove world mounting and apply contract axes at the mounting origin.
-                q = source['observation.state'][0][offset:offset + 6]
-                transforms = fk_poses(model, {f'arm_{side}_joint{i+1}': value for i, value in enumerate(q)})
-                wrist = np.linalg.inv(transforms[f'arm_{side}_base_link']) @ transforms[f'arm_{side}_link6']
-                expected = np.r_[wrist[:3, 3], wrist[:3, 2], wrist[:3, 0], wrist[:3, 1]]
-                np.testing.assert_allclose(poses['pose'][0].as_py(), expected, atol=1e-9)
-                gripper = pq.read_table(exported / 'state' / f'{side}_gripper.parquet')
-                self.assertEqual(gripper['timestamp_ns'].to_pylist(), times)
-                self.assertEqual(gripper['openness'].type, pa.float32())
-                self.assertEqual(gripper['openness'].to_pylist(), grips)
-            for key, camera in script.CAMERAS.items():
-                video = exported / 'rgb' / f'{camera}.mp4'
-                self.assertEqual(video.read_bytes(), (episode / 'videos' / f'{key}.mp4').read_bytes())
-                table = pq.read_table(exported / 'rgb' / f'{camera}.parquet')
-                self.assertEqual(table['timestamp_ns'].to_pylist(), times)
-                self.assertEqual(table['frame_index'].to_pylist(), list(range(4)))
-                with av.open(str(video)) as reader:
-                    self.assertEqual(reader.streams.video[0].codec_context.name, 'h264')
-                    self.assertEqual(len(reader.streams.audio), 0)
-                    for i, frame in enumerate(reader.decode(video=0)):
-                        self.assertAlmostEqual(frame.to_ndarray(format='rgb24').mean(), i * 60, delta=3)
+            for side, offset in (('left', 0), ('right', 7)):
+                expected = [expected_pose(model, side, row[offset:offset + 6]) for row in source['observation.state']]
+                np.testing.assert_allclose(exported[f'{side}_eef'], expected, atol=1e-6)
+                np.testing.assert_allclose(exported[f'{side}_gripper'], OPENED[side], atol=1e-6)
+            for camera in script.CAMERAS.values():
+                path, first = exported['videos'][camera]
+                assert_contract_video(self, path, 4)
+                np.testing.assert_allclose(video_means(path, first, 4), [0, 60, 120, 180], atol=3)
             # A finished output only accepts the configuration that produced it.
             with self.assertRaisesRegex(ValueError, 'Incompatible conversion config'):
                 convert('molmoact2', root / 'raw', root / 'out', limit=1)
+
+    @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
+    def test_25_fps_subset_is_resampled_by_its_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            episode = make_source(root / 'raw', fps=25)
+            # Move both arms between rows so that interpolated poses differ from every source row.
+            state = np.array(pq.read_table(episode / 'data.parquet')['observation.state'].to_pylist())
+            state[:, 0] += .15 * np.arange(4)
+            state[:, 4] -= .2 * np.arange(4)
+            state[:, 8] += .1 * np.arange(4)
+            state[:, 12] += .25 * np.arange(4)
+            rewrite(episode / 'data.parquet', **{'observation.state': state.tolist()})
+            (root / 'raw/source/meta/tasks_annotated.parquet').unlink()
+            convert('molmoact2', root / 'raw', root / 'out')
+            exported = read_export(root / 'out')[0]
+            # Rows at 0, 40, 80, 120 ms cover the frames at 0, 33.3, 66.7 and 100 ms; nothing is extrapolated.
+            self.assertEqual(exported['length'], 4)
+            source = np.array(pq.read_table(episode / 'data.parquet')['observation.state'].to_pylist())
+            seconds = row_times(4, 25).astype(np.float64)
+            model = parse_urdf(MODEL / 'robot.urdf')
+            for side, offset in (('left', 0), ('right', 7)):
+                rows = [expected_pose(model, side, row[offset:offset + 6]) for row in source]
+                np.testing.assert_allclose(exported[f'{side}_eef'][0], rows[0], atol=1e-6)
+                for frame in (1, 2, 3):
+                    low, weight = frame_bracket(seconds, frame)
+                    self.assertEqual(low, frame - 1)
+                    interpolated = interpolated_pose(rows[low], rows[low + 1], weight)
+                    np.testing.assert_allclose(exported[f'{side}_eef'][frame], interpolated, atol=1e-6)
+                    # The interpolated pose is a new value, not a copy of a neighbouring row.
+                    self.assertGreater(np.abs(interpolated - rows[low]).max(), 1e-3)
+                    self.assertGreater(np.abs(interpolated - rows[low + 1]).max(), 1e-3)
+                    np.testing.assert_allclose(exported[f'{side}_gripper'][frame],
+                                               OPENED[side][low] * (1 - weight) + OPENED[side][low + 1] * weight,
+                                               atol=1e-6)
+            # The task changes at the row at 80 ms, so the frame at 66.7 ms still has the first one.
+            self.assertEqual(exported['tasks'], ['拿起杯子', '拿起杯子', '拿起杯子', 'Put down'])
+            for camera in script.CAMERAS.values():
+                path, first = exported['videos'][camera]
+                assert_contract_video(self, path, 4)
+                # Nearest source frame; the frame at 100 ms is midway between rows 2 and 3 and takes the earlier.
+                np.testing.assert_allclose(video_means(path, first, 4), [0, 60, 120, 120], atol=3)
+
+    @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
+    def test_declared_rate_decides_and_the_median_row_interval_stands_in_for_it(self):
+        jitter = np.array([2., 2.031, 2.079, 2.141], dtype=np.float32)
+        cases = [(30, jitter, [0, 60, 120, 180]),            # declared 30 fps: timestamps are not consulted
+                 (None, row_times(4, 30), [0, 60, 120, 180]),  # undeclared, rows 1/30 s apart
+                 (None, row_times(4, 25), [0, 60, 120, 120])]  # undeclared, rows 1/25 s apart: resampled
+        for declared, timestamps, means in cases:
+            with self.subTest(declared=declared, timestamps=timestamps), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                episode = make_source(root / 'raw')
+                path = root / 'raw/source/meta/info.json'
+                info = json.loads(path.read_text())
+                if declared is None:
+                    del info['fps']
+                path.write_text(json.dumps(info))
+                rewrite(episode / 'data.parquet', timestamp=timestamps)
+                convert('molmoact2', root / 'raw', root / 'out')
+                exported = read_export(root / 'out')[0]
+                self.assertEqual(exported['length'], 4)
+                if means[-1] == 180:
+                    np.testing.assert_allclose(exported['left_gripper'], OPENED['left'], atol=1e-6)
+                else:
+                    self.assertAlmostEqual(exported['left_gripper'][1], .25 * (1 / 30) / .04, places=5)
+                video, first = exported['videos']['top']
+                np.testing.assert_allclose(video_means(video, first, 4), means, atol=3)
+
+    @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
+    def test_gap_in_resampled_rows_is_recorded_as_a_skip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            episode = make_source(root / 'raw', fps=25)
+            # No state between 40 ms and 300 ms: more than the 100 ms a frame may be interpolated across.
+            rewrite(episode / 'data.parquet', timestamp=np.array([2., 2.04, 2.30, 2.34], dtype=np.float32))
+            assert_conversion_fails(self, 'No episode was exported', 'molmoact2', root / 'raw', root / 'out')
+            record = skip_record(root / 'out', episode.name, published=False)
+            self.assertEqual((record['outcome'], record['reason']), ('skipped', 'sampling_gap'))
 
     def test_annotation_fallback_and_duplicate_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -227,14 +324,14 @@ class MolmoAct2Tests(unittest.TestCase):
                     times, _, instruction, _ = script.read_episode(episode, tasks, annotated, fk)
                 self.assertEqual(instruction, [
                     {'start_ns': 0, 'end_ns': times[2] - times[0], 'text': '拿起杯子'},
-                    {'start_ns': times[2] - times[0], 'end_ns': times[-1] - times[0], 'text': 'Put down'}])
+                    {'start_ns': times[2] - times[0], 'end_ns': times[-1] - times[0] + 1, 'text': 'Put down'}])
             (meta / 'tasks_annotated.parquet').unlink()
             self.assertEqual(script.load_tasks(meta)[1], {})
             pq.write_table(pa.table({'episode_index': [7, 7], 'task': ['A', 'B']}), meta / 'tasks_annotated.parquet')
             with self.assertRaisesRegex(ValueError, 'duplicate'):
                 script.load_tasks(meta)
 
-    def test_bad_rows_fail_before_copying_video(self):
+    def test_bad_rows_fail_before_decoding_video(self):
         mutations = [
             ('timestamp', [2., 1., 3., 4.]), ('timestamp', [2.] * 4),
             ('timestamp', [None, 2., 3., 4.]), ('timestamp', [0., float('inf'), 2., 3.]),
@@ -251,10 +348,9 @@ class MolmoAct2Tests(unittest.TestCase):
                 rows = pq.read_table(episode / 'data.parquet').to_pydict()
                 rows[key] = value
                 pq.write_table(pa.table(rows), episode / 'data.parquet')
-                with patch.object(script, 'YamFK'), patch.object(script, 'copy_h264_video') as video:
+                with patch.object(script, 'YamFK'), patch.object(script, 'transcode_video') as video:
                     assert_conversion_fails(self, '', 'molmoact2', root / 'raw', root / 'out')
                     video.assert_not_called()
-                self.assertFalse((root / 'out').exists())
 
     @unittest.skipUnless(MODEL.exists(), 'YAM asset package not installed')
     def test_failed_video_or_missing_episode_does_not_publish(self):
@@ -264,8 +360,8 @@ class MolmoAct2Tests(unittest.TestCase):
                 make_source(root / 'raw', frames=4 if missing_episode else 3)
                 if missing_episode:
                     (root / 'raw/episodes/episode_000008').mkdir()
-                assert_conversion_fails(self, '', 'molmoact2', root / 'raw', root / 'out')
-                self.assertFalse((root / 'out').exists())
+                assert_conversion_fails(self, '' if missing_episode else 'Decoded 3 frames; expected 4',
+                                        'molmoact2', root / 'raw', root / 'out')
 
     def test_wrong_layout_and_invalid_limit(self):
         with tempfile.TemporaryDirectory() as directory:

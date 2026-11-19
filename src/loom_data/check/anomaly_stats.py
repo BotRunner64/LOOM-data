@@ -6,37 +6,19 @@ from pathlib import Path
 import sys
 
 from loom_data.paths import EXPORT
-from loom_data.check.dataset_stats import discover_datasets
+from loom_data.check.dataset_stats import dataset_name
 
-from loom_data.contract import STATE_NAMES
+from loom_data.contract import STATE_NAMES, Dataset, discover_datasets
 REASONS = ('boundary_idle', 'internal_idle', 'state_jump')
 
 
 def read_episode_ids(root):
-    """Keep physical manifest indices, including gaps caused by blank lines."""
-    episodes, seen = {}, set()
-    path = root / 'episodes.jsonl'
-    with path.open(encoding='utf-8') as source:
-        for index, line in enumerate(source):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-                episode_id = record.get('episode_id') if isinstance(record, dict) else None
-                if (not isinstance(episode_id, str) or episode_id in ('', '.', '..')
-                        or any(char in episode_id for char in ('/', '\\', '\0'))):
-                    raise ValueError('invalid episode_id')
-                if episode_id in seen:
-                    raise ValueError(f'duplicate episode_id: {episode_id}')
-                episodes[index] = episode_id
-                seen.add(episode_id)
-            except ValueError as exc:
-                raise ValueError(f'{path}:{index + 1}: {exc}') from exc
-    return episodes
+    """episode_index -> episode_id; report records address episodes by episode_index."""
+    return {episode['episode_index']: episode['episode_id'] for episode in Dataset(root).episodes}
 
 
 def iter_anomalies(path, episodes):
-    """Stream and validate report records against the manifest."""
+    """Stream and validate report records against the dataset's episodes."""
     with path.open(encoding='utf-8') as source:
         for line_number, line in enumerate(source, 1):
             if not line.strip():
@@ -49,7 +31,7 @@ def iter_anomalies(path, episodes):
                     if type(record.get(field)) is not int or record[field] < 0:
                         raise ValueError(f'{field} must be a nonnegative integer')
                 if record['index'] not in episodes:
-                    raise ValueError('index does not address an episode manifest record')
+                    raise ValueError('index does not address an episode of the dataset')
                 if record.get('stream') not in STATE_NAMES:
                     raise ValueError('invalid stream')
                 if record['end_ns'] < record['start_ns']:
@@ -72,7 +54,7 @@ def summarize_dataset(root, report_path=None):
     root = Path(root).resolve()
     episodes = read_episode_ids(root)
     path = Path(report_path).resolve() if report_path is not None else root / 'anomalies.jsonl'
-    summary = {'dataset': root.name, 'path': str(root), 'report_path': str(path),
+    summary = {'dataset': dataset_name(root), 'path': str(root), 'report_path': str(path),
                'episode_count': len(episodes), 'report_status': 'available',
                'by_reason': {}}
     if not path.is_file():

@@ -1,4 +1,7 @@
-"""Convert ABC-130K MCAP episodes to the export contract using YAM joint FK."""
+"""Convert ABC-130K MCAP episodes to the export contract using YAM joint FK.
+
+The MCAP streams are asynchronous; they are resampled onto the 30 fps frame sequence.
+"""
 from __future__ import annotations
 
 from functools import cached_property
@@ -8,7 +11,8 @@ from pathlib import Path
 import numpy as np
 
 from loom_data.video import VideoWriter
-from loom_data.contract import write_state, write_video_index
+from loom_data.contract import episode_record, write_frames
+from loom_data.sync import frame_grid
 from loom_data.robot.yam import YamFK
 
 from loom_data.sources.base import Source, task_limit
@@ -50,14 +54,19 @@ def instructions(task, annotations, origin, end):
 
 def convert_episode(source, destination, fk):
     state = {name: ([], []) for name in STATES.values()}
-    videos, tasks = {}, []
-    camera_topics = {}
-    (destination / 'rgb').mkdir(parents=True)
-    # Validate all state before expensive video transcoding. The second MCAP
-    # pass only decodes camera topics; state samples retain their native times.
-    for topic, timestamp, decoded in messages(source / 'episode.mcap', list(STATES) + ['/instruction']):
+    tasks, camera_topics, camera_times = [], {}, {}
+    # Read all state and every camera's acquisition times before the expensive video
+    # pass: the 30 fps frame times depend on the interval all streams share.
+    for topic, timestamp, decoded in messages(source / 'episode.mcap',
+                                              list(STATES) + ['/instruction'] + list(CAMERAS)):
         if topic == '/instruction':
             tasks.append(decoded.data)
+            continue
+        if topic in CAMERAS:
+            camera = CAMERAS[topic]
+            if camera_topics.setdefault(camera, topic) != topic:
+                raise ValueError(f'{source}: multiple source topics for {camera}')
+            camera_times.setdefault(camera, []).append(timestamp)
             continue
         name = STATES[topic]
         if name.endswith('_eef'):
@@ -76,38 +85,34 @@ def convert_episode(source, destination, fk):
         raise ValueError(f'{source}: requires all four state streams')
     if len(tasks) != 1 or not tasks[0].strip():
         raise ValueError(f'{source}: expected one nonempty /instruction message')
-    with ExitStack() as stack:
-        for topic, timestamp, decoded in messages(source / 'episode.mcap', list(CAMERAS)):
-            camera = CAMERAS[topic]
-            if camera_topics.setdefault(camera, topic) != topic:
-                raise ValueError(f'{source}: multiple source topics for {camera}')
-            if camera not in videos:
-                videos[camera] = VideoWriter(destination / 'rgb' / f'{camera}.mp4', decoded.format)
-                stack.callback(videos[camera].close)
-            videos[camera].add(decoded.data, timestamp, decoded.format)
-        if not videos:
-            raise ValueError(f'{source}: requires at least one camera')
-        for writer in videos.values():
-            writer.finish()
-    streams = [times for times, _ in state.values()] + [video.timestamps for video in videos.values()]
+    if not camera_times:
+        raise ValueError(f'{source}: requires at least one camera')
+    streams = [times for times, _ in state.values()] + [sorted(times) for times in camera_times.values()]
     origin = min(times[0] for times in streams)
     end = max(times[-1] for times in streams)
+    grid = frame_grid(streams)
     annotations = []
     if (source / 'annotation.mcap').exists():
         annotations = [(timestamp, decoded.data) for _, timestamp, decoded in
                        messages(source / 'annotation.mcap', ['/subtask-annotation'])]
-    for name, (times, values) in state.items():
-        write_state(destination / 'state' / f'{name}.parquet', times, values, origin,
-                    pose=name.endswith('_eef'))
-    for camera, writer in videos.items():
-        write_video_index(destination / 'rgb' / f'{camera}.parquet', writer.timestamps, origin)
-    return {'episode_id': source.name, 'cameras': sorted(videos),
-            'instructions': instructions(tasks[0], annotations, origin, end)}
+    length = write_frames(destination, state, instructions(tasks[0], annotations, origin, end), origin, grid)
+    writers = {}
+    with ExitStack() as stack:
+        for topic, timestamp, decoded in messages(source / 'episode.mcap', list(CAMERAS)):
+            camera = CAMERAS[topic]
+            if camera not in writers:
+                writers[camera] = VideoWriter(destination / f'{camera}.mp4', decoded.format,
+                                              camera_times[camera], grid)
+                stack.callback(writers[camera].close)
+            writers[camera].add(decoded.data, timestamp, decoded.format)
+        videos = {camera: writer.finish() for camera, writer in writers.items()}
+    return episode_record(source.name, length, videos)
 
 
 class Abc130k(Source):
     name = 'abc130k'
     model = 'yam'
+    camera_sets = (('left_wrist', 'right_wrist', 'top'),)
 
     @classmethod
     def discover(cls, config, progress):

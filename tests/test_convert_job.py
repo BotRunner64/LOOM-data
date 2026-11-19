@@ -34,13 +34,43 @@ import test_convert_galaxea as galaxea_tests
 
 
 class CameraContractTests(unittest.TestCase):
-    def test_manifest_requires_distinct_canonical_views(self):
-        record = {'episode_id': 'ep', 'instructions': [{'start_ns': 0, 'end_ns': 1, 'text': 'pick'}]}
-        for cameras in (['top'], ['right_wrist', 'left_wrist'], ['top', 'left_wrist', 'right_wrist']):
-            contract.validate_record(dict(record, cameras=cameras), 'ep')
-        for cameras in ([], ['head'], ['top', 'top'], ['top', 'top_right']):
+    @staticmethod
+    def record(cameras):
+        stats = {'min': [0.] * 3, 'max': [1.] * 3, 'sum': [1.] * 3, 'sumsq': [1.] * 3, 'count': 4}
+        return {'episode_id': 'ep', 'cameras': cameras, 'length': 2,
+                'sizes': {camera: [640, 480] for camera in cameras},
+                'image_stats': {camera: stats for camera in cameras}}
+
+    def test_record_requires_distinct_canonical_views_in_sorted_order(self):
+        for cameras in (['top'], ['left_wrist', 'right_wrist'], ['left_wrist', 'right_wrist', 'top']):
+            contract.validate_record(self.record(cameras), 'ep')
+        for cameras in ([], ['head'], ['top', 'top'], ['top', 'top_right'], ['top', 'left_wrist']):
             with self.subTest(cameras=cameras), self.assertRaisesRegex(ValueError, 'invalid cameras'):
-                contract.validate_record(dict(record, cameras=cameras), 'ep')
+                contract.validate_record(self.record(cameras), 'ep')
+
+    def test_record_requires_contract_resolutions_and_two_frames(self):
+        record = self.record(['top'])
+        for change, message in (({'sizes': {'top': [640, 481]}}, 'resolutions'), ({'sizes': {}}, 'resolutions'),
+                                ({'length': 1}, 'length'), ({'image_stats': {}}, 'statistics')):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, message):
+                contract.validate_record({**record, **change}, 'ep')
+
+    def test_resolution_follows_the_aspect_ratio_and_layout_names_are_deterministic(self):
+        self.assertEqual([contract.export_size(*size) for size in ((640, 480), (1920, 1200), (640, 360), (1600, 1300), (320, 240))],
+                         [(640, 480), (640, 400), (640, 360), (640, 520), (640, 480)])
+        for size in ((32, 32), (640, 0), (1280, 1024)):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                contract.export_size(*size)
+        cameras = ['left_wrist', 'right_wrist', 'top']
+        self.assertEqual(contract.layout_name(cameras, {c: [640, 480] for c in cameras}),
+                         'top+left_wrist+right_wrist_640x480')
+        self.assertEqual(contract.layout_name(cameras, {'top': [640, 360], 'left_wrist': [640, 480], 'right_wrist': [640, 480]}),
+                         'top+left_wrist+right_wrist_640x360+640x480+640x480')
+        self.assertEqual(contract.layout_name(['left_wrist', 'right_wrist'], {'left_wrist': [640, 520], 'right_wrist': [640, 520]}),
+                         'left_wrist+right_wrist_640x520')
+        for name in ('top+left_wrist+right_wrist_640x480', 'left_wrist+right_wrist_640x520'):
+            self.assertTrue(contract.LAYOUT.fullmatch(name))
+        self.assertFalse(contract.LAYOUT.fullmatch('ABC-130K'))
 
 
 class InputStampTests(unittest.TestCase):
@@ -82,8 +112,7 @@ def add_hifi_episode(source, index):
     pq.write_table(table, destination / 'data.parquet')
 
 
-def manifest(output):
-    return [json.loads(line) for line in (output / 'episodes.jsonl').read_text().splitlines()]
+manifest = support.manifest
 
 
 class HifiShardTests(unittest.TestCase):
@@ -290,17 +319,21 @@ class ResumeTests(unittest.TestCase):
 
     def test_finalize_interruption_and_already_published_noop(self):
         self.assertEqual(parallel.worker(self.output, 0, 1), 0)
-        original_atomic = parallel.atomic_text
+        build = contract.build_dataset
 
-        def stop_after_manifest(path, text):
-            original_atomic(path, text)
-            if path.name == 'episodes.jsonl':
-                raise KeyboardInterrupt()
+        def stop_after_build(*args, **kwargs):
+            build(*args, **kwargs)
+            raise KeyboardInterrupt()
 
-        with patch.object(parallel, 'atomic_text', side_effect=stop_after_manifest):
+        # Interrupted while assembling: the half-built datasets are discarded and rebuilt.
+        with patch.object(contract, 'build_dataset', side_effect=stop_after_build):
             with self.assertRaises(KeyboardInterrupt):
                 parallel.finalize(self.output)
+        self.assertTrue(any((self.store.work / 'publish').iterdir()))
+        self.assertFalse(self.output.exists())
         parallel.prepare(self.config, self.output)
+        self.assertFalse((self.store.work / 'publish').exists())
+        self.assertIsNotNone(self.store.state(self.episode_id))
         original_rename = Path.rename
 
         def stop_after_publish(path, destination):
@@ -309,9 +342,11 @@ class ResumeTests(unittest.TestCase):
                 raise KeyboardInterrupt()
             return result
 
+        # Interrupted right after publication, before the staged episodes are removed.
         with patch.object(Path, 'rename', stop_after_publish):
             with self.assertRaises(KeyboardInterrupt):
                 parallel.finalize(self.output)
+        self.assertTrue(self.store.dataset.exists())
         with patch.object(resumable.subprocess, 'Popen') as spawn:
             parallel.run(self.config, self.output, workers=7)
             spawn.assert_not_called()
@@ -334,7 +369,7 @@ class ResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(parallel.StateError, 'Unexpected episode'):
             parallel.finalize(self.output)
         extra.rmdir()
-        next((self.store.dataset / 'episodes' / self.episode_id / 'rgb').glob('*.mp4')).unlink()
+        next((self.store.dataset / 'episodes' / self.episode_id).glob('*.mp4')).unlink()
         with self.assertRaisesRegex(parallel.StateError, 'damaged recovery'):
             parallel.prepare(self.config, self.output)
 
@@ -352,8 +387,7 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(parallel.worker(self.output, 0, 1), 0)
         episode = self.store.dataset / 'episodes' / self.episode_id
         paths = [self.store.work / 'records' / f'{self.episode_id}.json',
-                 episode, episode / 'state', episode / 'rgb',
-                 next((episode / 'rgb').glob('*.mp4'))]
+                 episode, episode / contract.FRAMES, next(episode.glob('*.mp4'))]
         for path in paths:
             saved = self.root / 'saved'
             path.rename(saved)
@@ -372,7 +406,7 @@ class ResumeTests(unittest.TestCase):
 
     def test_audit_rejects_changed_sizes_empty_and_extra_files(self):
         self.assertEqual(parallel.worker(self.output, 0, 1), 0)
-        rgb = self.store.dataset / 'episodes' / self.episode_id / 'rgb'
+        rgb = self.store.dataset / 'episodes' / self.episode_id
         video = next(rgb.glob('*.mp4'))
         original = video.read_bytes()
         for contents in (b'', original + b'changed'):
@@ -667,13 +701,13 @@ class SourceTests(unittest.TestCase):
         episode.mkdir(parents=True)
         (episode / 'episode.mcap').touch()
         context = av.CodecContext.create('libx264', 'w')
-        context.width = context.height = 32
+        context.width, context.height = 64, 48
         context.pix_fmt = 'yuv420p'
         context.time_base = Fraction(1, 30)
         context.options = {'bf': '0', 'threads': '1'}
         packets = []
         for index in range(3):
-            frame = av.VideoFrame.from_ndarray(np.full((32, 32, 3), index * 70, np.uint8), format='rgb24')
+            frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), index * 70, np.uint8), format='rgb24')
             frame.pts = index
             packets.extend(context.encode(frame))
         packets.extend(context.encode(None))
@@ -681,14 +715,21 @@ class SourceTests(unittest.TestCase):
         for topic in abc130k.STATES:
             for time in (0, 100000000):
                 records.append((topic, time, SimpleNamespace(position=[0.] * 6 if 'arm' in topic else [.5])))
-        for index, packet in enumerate(packets):
-            records.append(('/top-camera', index * 50000000, SimpleNamespace(data=bytes(packet), format='h264')))
+        for topic in ('/top-camera', '/left-wrist-camera', '/right-wrist-camera'):
+            for index, packet in enumerate(packets):
+                records.append((topic, index * 50000000, SimpleNamespace(data=bytes(packet), format='h264')))
         output = self.root / 'out'
         parallel.prepare(make_config('abc130k', source), output)
         with patch.object(abc130k, 'messages', side_effect=lambda path, topics: (r for r in records if r[0] in topics)):
             self.assertEqual(parallel.worker(output, 0, 1), 0)
         parallel.finalize(output)
-        self.assertEqual(manifest(output)[0]['cameras'], ['top'])
+        episode, = support.read_export(output)
+        self.assertEqual(episode['layout'], 'top+left_wrist+right_wrist_640x480')
+        self.assertEqual(episode['length'], 4)  # frames at 0, 1/30, 2/30, 0.1 s within the shared 0-0.1 s
+        np.testing.assert_allclose(episode['left_gripper'], .5)
+        path, first = episode['videos']['top']
+        # Source frames at 0, 50, 100 ms; each 30 fps frame takes the nearest.
+        np.testing.assert_allclose(support.video_means(path, first, 4), [0, 70, 70, 140], atol=4)
 
     def test_plan_rejects_duplicate_ids_before_creating_output(self):
         source = self.root / 'raw'
@@ -718,23 +759,12 @@ def agibot_source(root):
     for key in agibotworld2026.STATE_FIELDS:
         fields[key] = {'indices': list(range(len(state), len(state) + len(sample[key])))}
         state.extend(sample[key])
-    info = {'robot_type': 'g2a', 'total_episodes': 2, 'features': {
+    info = {'robot_type': 'g2a', 'total_episodes': 2, 'fps': 10, 'features': {
         'observation.state': {'field_descriptions': fields},
-        'observation.images.hand_left': {'video_info': {'video.is_depth_map': False}},
+        **{key: {'video_info': {'video.is_depth_map': False}} for key in agibotworld2026.CAMERAS},
         'action': {'field_descriptions': {'action/robot/velocity': {'indices': [0, 1, 2]}}},
     }}
-    video = root / 'source.mp4'
-    with av.open(str(video), 'w') as writer:
-        stream = writer.add_stream('libx264', rate=10)
-        stream.width = stream.height = 32
-        stream.pix_fmt = 'yuv420p'
-        stream.thread_count = 1
-        for index in range(3):
-            frame = av.VideoFrame.from_ndarray(np.full((32, 32, 3), index * 70, np.uint8), format='rgb24')
-            for packet in stream.encode(frame):
-                writer.mux(packet)
-        for packet in stream.encode():
-            writer.mux(packet)
+    video = support.write_video(root / 'source.mp4', [0, 70, 140], rate=10)
     archive_path = root / 'raw/task_1/0_1.tar.gz'
     archive_path.parent.mkdir(parents=True)
     with tarfile.open(archive_path, 'w:gz') as archive:
@@ -751,7 +781,8 @@ def agibot_source(root):
             pq.write_table(table, buffer)
             add(f'data/data/chunk-000/episode_{index:06d}.parquet', buffer.getvalue())
         for index in range(2):
-            add(f'data/videos/chunk-000/observation.images.hand_left/episode_{index:06d}.mp4', video.read_bytes())
+            for key in agibotworld2026.CAMERAS:
+                add(f'data/videos/chunk-000/{key}/episode_{index:06d}.mp4', video.read_bytes())
     return archive_path
 
 
@@ -768,11 +799,11 @@ class ArchiveResumeTests(unittest.TestCase):
             original = agibotworld2026.transcode_video
             calls = []
 
-            def interrupted(source, destination, count):
+            def interrupted(source, destination, times, grid=None):
                 calls.append(destination)
-                if len(calls) == 2:
+                if destination.parent.name == store.ids[1]:
                     raise KeyboardInterrupt('second episode interrupted')
-                return original(source, destination, count)
+                return original(source, destination, times, grid)
 
             with patch.object(agibotworld2026, 'transcode_video', side_effect=interrupted):
                 with self.assertRaises(KeyboardInterrupt):
@@ -784,11 +815,17 @@ class ArchiveResumeTests(unittest.TestCase):
                 for rank in range(3):
                     self.assertEqual(parallel.worker(output, rank, 3), 0)
                 self.assertEqual(read.call_count, 1)
-                self.assertEqual(transcode.call_count, 1)
+                self.assertEqual(transcode.call_count, 3)  # the three cameras of the unfinished episode only
             parallel.finalize(output)
             reference = root / 'reference'
             support.convert('agibotworld2026', source, reference, model_dir=config['model_dir'])
             self.assertEqual(manifest(output), manifest(reference))
+            # 3 rows at 10 fps cover 0.2 s: 7 frames at 30 fps, each source image repeated.
+            for resumed, direct in zip(support.read_export(output), support.read_export(reference)):
+                self.assertEqual(resumed['length'], 7)
+                np.testing.assert_array_equal(resumed['state'], direct['state'])
+                path, first = resumed['videos']['top']
+                np.testing.assert_allclose(support.video_means(path, first, 7), [0, 0, 70, 70, 70, 140, 140], atol=4)
 
     def test_archive_failure_continues_and_global_limit_is_frozen(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -799,10 +836,10 @@ class ArchiveResumeTests(unittest.TestCase):
             store = parallel.prepare(config, output)
             original = agibotworld2026.transcode_video
 
-            def fail_first(source, destination, count):
-                if destination.parent.parent.name == store.ids[0]:
+            def fail_first(source, destination, times, grid=None):
+                if destination.parent.name == store.ids[0]:
                     raise ValueError('injected broken video')
-                return original(source, destination, count)
+                return original(source, destination, times, grid)
 
             with patch.object(agibotworld2026, 'transcode_video', side_effect=fail_first):
                 self.assertEqual(parallel.worker(output, 0, 1), 1)
