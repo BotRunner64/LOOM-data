@@ -75,16 +75,29 @@ class ResampleTests(unittest.TestCase):
         result = sync.resample_poses([0, 80_000_000], poses, np.array([40_000_000]))
         np.testing.assert_allclose(result[0, 3:], rotation_z(180), atol=1e-9)
 
-    def test_a_gap_over_100_ms_is_dropped_unless_a_sample_sits_on_the_frame(self):
-        times, values = [0, 150_000_000], [0., 1.]
-        np.testing.assert_allclose(sync.resample_scalar(times, values, np.array([0, 150_000_000])), [0, 1])
-        for function, data in ((sync.resample_scalar, values),
-                               (sync.resample_poses, np.tile([0, 0, 0, *rotation_z(0)], (2, 1)))):
+    def test_a_state_gap_over_the_limit_is_dropped_unless_a_sample_sits_on_the_frame(self):
+        wide = sync.STATE_GAP_NS + 50_000_000
+        times, values = [0, wide], [0., 1.]
+        still = np.tile([0, 0, 0, *rotation_z(0)], (2, 1))
+        np.testing.assert_allclose(sync.resample_scalar(times, values, np.array([0, wide])), [0, 1])
+        for function, data in ((sync.resample_scalar, values), (sync.resample_poses, still)):
             with self.assertRaises(SourceDataError) as caught:
-                function(times, data, np.array([75_000_000]))
+                function(times, data, np.array([wide // 2]))
             self.assertEqual(caught.exception.reason, 'sampling_gap')
+            self.assertIn(f'{sync.STATE_GAP_NS // 1_000_000} ms', str(caught.exception))
+            # Samples exactly the limit apart are still interpolated across.
+            function([0, sync.STATE_GAP_NS], data, np.array([sync.STATE_GAP_NS // 2]))
         with self.assertRaisesRegex(ValueError, 'outside the sampled interval'):
-            sync.resample_scalar(times, values, np.array([200_000_000]))
+            sync.resample_scalar(times, values, np.array([wide + 50_000_000]))
+
+    def test_a_125_ms_state_gap_is_interpolated_across(self):
+        times = [0, 125_000_000]                            # a dropout seen in real recordings
+        grid = np.array([sync.frame_ns(k) for k in range(4)])
+        np.testing.assert_allclose(sync.resample_scalar(times, [0., 1.], grid), grid / 125_000_000, atol=1e-12)
+        poses = np.array([[0, 0, 0, *rotation_z(0)], [1, 2, 4, *rotation_z(90)]], dtype=float)
+        result = sync.resample_poses(times, poses, grid)
+        for row, weight in zip(result, grid / 125_000_000):
+            np.testing.assert_allclose(row, [weight, 2 * weight, 4 * weight, *rotation_z(90 * weight)], atol=1e-12)
 
     def test_rgb_takes_the_nearest_frame_repeating_and_dropping(self):
         slow = [k * NS // 15 for k in range(3)]             # 15 fps: every frame used twice
@@ -93,9 +106,23 @@ class ResampleTests(unittest.TestCase):
         fast = [k * NS // 60 for k in range(9)]             # 60 fps: every other frame dropped
         np.testing.assert_array_equal(sync.nearest(fast, grid), [0, 2, 4, 6, 8])
         np.testing.assert_array_equal(sync.nearest([0, 10, 20], np.array([5])), [0])  # ties take the earlier
+        # A frame time exactly the limit from both neighbours still takes one; any farther is a gap.
+        limit = sync.FRAME_GAP_NS
+        np.testing.assert_array_equal(sync.nearest([0, 2 * limit], np.array([limit])), [0])
         with self.assertRaises(SourceDataError) as caught:
-            sync.nearest([0, 200_000_000], np.array([100_000_000]))
+            sync.nearest([0, 2 * limit + 4_000_000], np.array([limit + 2_000_000]))
         self.assertEqual(caught.exception.reason, 'sampling_gap')
+        self.assertIn(f'{limit // 1_000_000} ms', str(caught.exception))
+
+    def test_a_short_camera_dropout_repeats_the_nearest_frames(self):
+        # A 30 fps camera loses frames 4..8 (167 ms): source index 3 is frame 3, index 4 is frame 9.
+        source = [sync.frame_ns(k) for k in (0, 1, 2, 3, 9, 10, 11, 12)]
+        grid = np.array([sync.frame_ns(k) for k in range(13)])
+        # The frame before the dropout covers its first half and the midpoint, the frame after the rest.
+        np.testing.assert_array_equal(sync.nearest(source, grid), [0, 1, 2, 3, 3, 3, 3, 4, 4, 4, 5, 6, 7])
+        # The same dropout seen from frame times offset by a third of a frame interval.
+        np.testing.assert_array_equal(sync.nearest(source, grid[:-1] + 11_111_111),
+                                      [0, 1, 2, 3, 3, 3, 4, 4, 4, 4, 5, 6])
 
 
 if __name__ == '__main__':

@@ -11,7 +11,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from support import MODELS, assert_conversion_fails, convert, datasets, episode_errors, read_export, video_means
-from loom_data import contract
+from loom_data import contract, sync
 from loom_data.sources import abc130k as script
 from loom_data.sources.policy import SourceDataError
 from loom_data.sync import frame_ns
@@ -233,14 +233,17 @@ class ExportTests(unittest.TestCase):
         gripper = [(FRAME[k], [k / 10]) for k in range(4)]
         states = {'/left-arm-state': arm, '/right-arm-state': arm, '/left-ee-state': gripper, '/right-ee-state': gripper}
         cameras = {topic: FRAME[:4] for topic in ALL_CAMERAS}
+        # Frame times spanning a little over twice the RGB limit.
+        span = [frame_ns(k) for k in range(2 * sync.FRAME_GAP_NS * sync.FPS // sync.NS_PER_SECOND + 4)]
         episodes = {
             'good': episode(states, cameras),
-            # Two arm samples 150 ms apart with frame times between them.
-            'state_gap': episode({**states, '/left-arm-state': [(0, [0., 0.]), (150*MS, [1., 0.])],
+            # Two arm samples farther apart than the state limit, with frame times between them.
+            'state_gap': episode({**states, '/left-arm-state': [(0, [0., 0.]), (sync.STATE_GAP_NS + 50*MS, [1., 0.])],
                                   '/right-ee-state': [(k*50*MS, [0.]) for k in range(4)]},
                                  {topic: FRAME[:6] for topic in cameras}),
-            # The frame at 67 ms has no camera frame within 50 ms.
-            'rgb_gap': episode(states, {**cameras, '/left-wrist-camera': [0, 120*MS]}),
+            # The wrist camera has only the first and last frame: those midway are beyond the RGB limit of both.
+            'rgb_gap': episode({topic: [(t, [0.] * (2 if 'arm' in topic else 1)) for t in span] for topic in states},
+                               {**{topic: span for topic in cameras}, '/left-wrist-camera': [span[0], span[-1]]}, step=10),
             # The wrist camera starts after the state ends.
             'disjoint': episode(states, {**cameras, '/right-wrist-camera': [FRAME[5], FRAME[6]]}),
             # The streams overlap for less than one frame interval.
@@ -279,6 +282,33 @@ class ExportTests(unittest.TestCase):
                 self.assertEqual((record['outcome'], record['reason'], record['reasons']), ('skipped', reason, [reason]))
                 self.assertTrue(record['detail'].strip())
             self.assertEqual(episode_errors(root / 'export'), '')
+
+    def test_a_short_camera_dropout_is_exported_with_the_neighbouring_image_repeated(self):
+        # The top camera loses frames 3, 4 and 5 (a 133 ms hole); every other stream is complete.
+        arm = [(FRAME[k], [float(k), 0.]) for k in range(8)]
+        gripper = [(FRAME[k], [k / 10]) for k in range(8)]
+        kept = [0, 1, 2, 6, 7]
+        records = episode({'/left-arm-state': arm, '/right-arm-state': arm,
+                           '/left-ee-state': gripper, '/right-ee-state': gripper},
+                          {'/top-camera': [FRAME[k] for k in kept],
+                           '/left-wrist-camera': FRAME, '/right-wrist-camera': FRAME}, step=30)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.export(root, {'dropout': records})
+            exported, = read_export(root / 'export')
+            self.assertEqual((exported['episode_id'], exported['length']), ('dropout', 8))
+            self.assertEqual(episode_errors(root / 'export'), '')
+            # Source image i of the top camera is gray 30*i. The image before the hole also fills
+            # frames 3 and 4 (4 is midway, so it takes the earlier), the one after it frame 5.
+            path, first = exported['videos']['top']
+            np.testing.assert_allclose(video_means(path, first, 8), np.array([0, 1, 2, 2, 2, 3, 3, 4]) * 30, atol=3)
+            for camera in ('left_wrist', 'right_wrist'):
+                path, first = exported['videos'][camera]
+                np.testing.assert_allclose(video_means(path, first, 8), np.arange(8) * 30, atol=3, err_msg=camera)
+            # State is sampled on every frame time and does not notice the dropout.
+            for side in ('left', 'right'):
+                np.testing.assert_allclose(exported[f'{side}_eef'][:, 0], np.arange(8), atol=1e-6)
+                np.testing.assert_allclose(exported[f'{side}_gripper'], np.arange(8) / 10, atol=1e-6)
 
     def test_published_dataset_is_a_30_fps_lerobot_v3_layout(self):
         with tempfile.TemporaryDirectory() as tmp:

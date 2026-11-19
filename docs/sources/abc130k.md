@@ -102,7 +102,7 @@ EEF 三轴按契约的固定规则对齐到 YAM 模型：
 - 腕部相机分别导出为 `left_wrist`、`right_wrist`。RealSense 的 `/top-camera` 和 ZED-X 的左目 `/top-left-camera` 各自在对应工作站导出为 `top`。
 - 源是异步采样，按契约第 3 节重采样到 30 fps：帧序列覆盖四路 state 和三路相机都有数据的时间段；
   位姿做位置线性插值加旋转 slerp，夹爪线性插值，RGB 取采集时刻最近的原生帧。
-  帧时刻两侧的 state 样本间隔超过 100 ms 或最近 RGB 帧偏离超过 50 ms 的 episode 不导出，
+  帧时刻两侧的 state 样本间隔超过 500 ms 或最近 RGB 帧偏离超过 250 ms 的 episode 不导出，
   记为 `sampling_gap`；各流的共同时间段不足两帧的记为 `no_common_interval`。
 - FK 在每个原生关节样本上计算，再对得到的位姿插值，不对关节角插值。
 - 夹爪实测开合裁剪到 `[0,1]`：小于 0 置为 0，大于 1 置为 1，范围内保持原值。
@@ -120,9 +120,10 @@ EEF 三轴按契约的固定规则对齐到 YAM 模型：
 
 允许的布局只有一种相机集合：`top`、`left_wrist`、`right_wrist` 三路齐全。缺任何一路的 episode 不导出，记为 `unsupported_layout`。
 
-两种工作站的相机宽高比不同，自动导出为两个数据集：
+相机的宽高比有三种，自动导出为三个数据集：
 
 | 工作站 | 源分辨率 | 布局 |
 |---|---|---|
 | RealSense | 640×480（4:3） | `top+left_wrist+right_wrist_640x480` |
 | ZED-X | 1920×1200（16:10） | `top+left_wrist+right_wrist_640x400` |
+| RealSense（宽屏模式） | 848×480（53:30） | `top+left_wrist+right_wrist_848x480` |

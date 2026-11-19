@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 
 from support import (MODELS, assert_conversion_fails, convert, datasets, episode_errors, manifest, read_export,
                      video_means, write_video)
+from loom_data import sync
 from loom_data.convert import job
 from loom_data.sources.agibotworld2026 import (
     CAMERAS, G2FK, STATE_FIELDS, pose_matrix,
@@ -389,7 +390,9 @@ class AgibotWorld2026ExportTests(unittest.TestCase):
 
     def test_rows_too_sparse_to_resample_are_skipped_as_a_sampling_gap(self):
         write_archive(self.root / 'raw/task_7/3_1.tar.gz', episodes=1)
-        write_archive(self.root / 'raw/task_7/4_1.tar.gz', fps=5, timestamps=(0., .2, .4))  # 200 ms between rows
+        # Rows twice as far apart as a frame may be interpolated across.
+        fps = sync.NS_PER_SECOND // (2 * sync.STATE_GAP_NS)
+        write_archive(self.root / 'raw/task_7/4_1.tar.gz', fps=fps, timestamps=(0., 1 / fps, 2 / fps))
         convert('agibotworld2026', self.root / 'raw', self.output)
         self.assertEqual(skips(self.output), {f'task_7_4_1_episode_00000{i}': 'sampling_gap' for i in range(2)})
         self.assertEqual(episode_errors(self.output), '')  # a contract drop, not a failure, even for a strict source

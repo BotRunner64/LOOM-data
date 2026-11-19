@@ -11,6 +11,7 @@ import numpy as np
 
 from support import (assert_conversion_fails, convert, datasets, episode_errors, manifest, read_export,
                      video_means, write_video)
+from loom_data import sync
 from loom_data.convert import job
 from loom_data.sources import agibotworld_beta as script
 from loom_data.geometry import pose_matrix, tool_transform
@@ -199,8 +200,10 @@ class BetaExportTests(unittest.TestCase):
     def test_a_hole_in_resampled_rows_is_dropped_as_a_sampling_gap(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);make_source(root/'raw')
-            # 15 fps rows with a 333 ms hole: no state to interpolate and no RGB frame near those frames.
-            make_source(root/'raw', 124, offsets=[i * 66_666_667 for i in (0, 1, 2, 3, 8, 9, 10, 11)])
+            # 15 fps rows with a hole wider than the state limit: no state to interpolate and no RGB
+            # frame near the frames inside it.
+            hole = sync.STATE_GAP_NS // 66_666_667 + 2
+            make_source(root/'raw', 124, offsets=[i * 66_666_667 for i in (*range(4), *range(3 + hole, 7 + hole))])
             convert('agibotworld_beta', root/'raw',root/'out')
             self.assertEqual(skips(root/'out'), {'task_694_episode_124': 'sampling_gap'})
             self.assertEqual(manifest(root/'out'), [{'episode_id': 'task_694_episode_123'}])

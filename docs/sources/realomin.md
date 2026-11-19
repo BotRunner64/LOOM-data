@@ -164,7 +164,7 @@ URDF 的 SHA-256。固定关节数值与附件哈希保存在
 使用 MCAP 内嵌 Protobuf schema。只选 `robot0/1` 的中央相机 `camera0`，分别导出为 `left_wrist`、`right_wrist`。
 
 帧序列覆盖四路 state 和两路相机都有数据的时间段。位姿做位置线性插值加旋转 slerp，夹爪线性插值，
-RGB 取采集时刻最近的原生帧。帧时刻两侧的 state 样本间隔超过 100 ms 或最近 RGB 帧偏离超过 50 ms 的
+RGB 取采集时刻最近的原生帧。帧时刻两侧的 state 样本间隔超过 500 ms 或最近 RGB 帧偏离超过 250 ms 的
 episode 不导出，记为 `sampling_gap`；共同时间段不足两帧的记为 `no_common_interval`。
 
 逐条 H.264 消息解码，校验消息与显示帧一一对应；消息数量、视频帧数不一致或显示帧对应时间递减时整集 drop。

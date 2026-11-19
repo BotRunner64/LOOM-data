@@ -10,6 +10,7 @@ it stopped. State lives in a work directory beside the output:
     dataset/           committed (staged) episodes, one directory each
     publish/           LeRobot v3 datasets, one per camera layout, built by finalize
     published.json     written just before publish/ is renamed to the output
+    claims/, commits/  which worker holds a task, and which one committed an episode
 """
 from __future__ import annotations
 
@@ -23,15 +24,18 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 
 from loom_data import contract, paths, resumable, sources
 from loom_data.convert import config as configuration
+from loom_data.convert import claims as claim_files
 from loom_data.convert.budget import sample_tasks
+from loom_data.convert.claims import Claims
 from loom_data.sources.base import CONTRACT_DROPS
 from loom_data.resumable import (
-    StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, input_stamp,
-    no_progress, progress, read_json, require_single_process, run_cli, run_workers, sync_directory,
+    AlreadyDone, StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, input_stamp,
+    available_cpus, no_progress, progress, read_json, require_single_process, run_cli, run_workers, sync_directory,
     worker_diagnostics, worker_rank,
 )
 
@@ -210,7 +214,7 @@ class Store:
 
     def commit(self, episode_id, directory, manifest):
         if self.state(episode_id) is not None:
-            raise StateError(f'{episode_id}: already committed')
+            raise AlreadyDone(f'{episode_id}: already committed')
         if manifest.get('episode_id') != episode_id or directory.name != episode_id:
             raise StateError('Conversion returned a different episode ID')
         manifest = dict(manifest)
@@ -222,14 +226,26 @@ class Store:
             with (directory / name).open('rb') as handle:
                 os.fsync(handle.fileno())
         sync_directory(directory)
-        atomic_json(self.work / 'records' / f'{episode_id}.json',
-                    {'plan_id': self.plan['id'], 'episode_id': episode_id,
-                     'outcome': 'exported', 'manifest': manifest, 'files': sizes,
-                     'conversion': conversion})
+        # One committer per episode: the record and the directory must come from the same worker.
+        # A lock left by a worker that died inside commit is cleared by the next prepare.
+        lock = self.work / 'commits' / episode_id
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+        except FileExistsError as exc:
+            raise AlreadyDone(f'{episode_id}: being committed by another worker') from exc
         destination = self.dataset / 'episodes' / episode_id
-        if destination.exists():
-            raise StateError(f'{episode_id}: destination appeared during conversion')
-        directory.rename(destination)
+        try:
+            if destination.exists() or destination.is_symlink():
+                raise AlreadyDone(f'{episode_id}: destination appeared during conversion')
+            atomic_json(self.work / 'records' / f'{episode_id}.json',
+                        {'plan_id': self.plan['id'], 'episode_id': episode_id,
+                         'outcome': 'exported', 'manifest': manifest, 'files': sizes,
+                         'conversion': conversion})
+            directory.rename(destination)
+        except BaseException:
+            if not destination.exists():
+                lock.unlink(missing_ok=True)  # nothing was published; let a retry commit
+            raise
         sync_directory(destination.parent)
         sync_directory(directory.parent)
         (self.work / 'errors' / f'{episode_id}.err').unlink(missing_ok=True)
@@ -239,7 +255,7 @@ class Store:
         if not self.skips and reason not in CONTRACT_DROPS:
             raise StateError('This dataset has no legitimate skip policy')
         if self.state(episode_id) is not None:
-            raise StateError(f'{episode_id}: already completed')
+            raise AlreadyDone(f'{episode_id}: already completed')
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError('A skip needs an explicit reason')
         reasons = list(dict.fromkeys(reasons or [reason]))
@@ -341,13 +357,13 @@ def prepare(config, output):
         return store
     if (work / 'publish').exists() and not (work / 'publish').is_symlink():
         shutil.rmtree(work / 'publish')
-    for name in ('records', 'errors', 'logs', 'staging', 'dataset/episodes'):
+    for name in ('records', 'errors', 'logs', 'staging', 'claims', 'commits', 'dataset/episodes'):
         directory = work / name
         if directory.is_symlink():
             raise StateError(f'Symlink working directory: {directory}')
         directory.mkdir(parents=True, exist_ok=True)
     # Only prepare may clean attempts and diagnostics, and only after previous workers have exited.
-    for name in ('logs', 'staging'):
+    for name in ('logs', 'staging', 'claims', 'commits'):
         for path in (work / name).iterdir():
             if path.is_dir() and not path.is_symlink():
                 shutil.rmtree(path)
@@ -356,6 +372,8 @@ def prepare(config, output):
     for directory in (work, work / 'records', work / 'errors', store.dataset):
         for path in directory.glob('.*.tmp'):
             path.unlink()
+    # Marks the start of a round: workers retry failures recorded before it, not after.
+    atomic_text(work / 'round', '')
     exported, skipped, missing = store.audit(progress=progress)
     store.write_summary()
     total = len(store.ids)
@@ -368,7 +386,14 @@ def prepare(config, output):
     return store
 
 
-def worker(output, worker_id, worker_count, *, report=None):
+def worker(output, worker_id=0, worker_count=1, *, report=None):
+    """Convert tasks until none is left that this worker can take.
+
+    Workers are interchangeable: each claims a task on the shared filesystem,
+    converts it and moves on, so any number may start, stop or die at any time.
+    `worker_id` / `worker_count` only spread the starting points across the
+    plan, so that workers launched together do not contend for the same tasks.
+    """
     report = report or (lambda message: None)
     report(f'Worker {worker_id}/{worker_count}: configuring dependencies')
     if worker_count < 1 or not 0 <= worker_id < worker_count:
@@ -382,20 +407,46 @@ def worker(output, worker_id, worker_count, *, report=None):
         return 0
     report('Initializing source')
     source = sources.get(store.plan['config']['dataset'])(store.plan['config'])
+    tasks = store.plan['tasks']
+    try:
+        round_started = (store.work / 'round').stat().st_mtime
+    except OSError as exc:
+        raise StateError('Run prepare before starting workers') from exc
+    claims = Claims(store.work / 'claims')
+    report(f'Claim owner: {claims.owner}')
+    # One directory listing replaces a record lookup per task for everything already done.
+    recorded = {name[:-5] for name in os.listdir(store.work / 'records') if name.endswith('.json')}
+    staged = set(os.listdir(store.dataset / 'episodes'))
+
+    def done(episode_id):
+        # A record alone is not enough: a worker killed between writing the record and
+        # moving the episode into place leaves a record whose episode must be converted again.
+        return episode_id in recorded and (episode_id in staged or store.state(episode_id) is not None)
+
+    start = len(tasks) * worker_id // worker_count
+    waiting = [i for i in (*range(start, len(tasks)), *range(start))
+               if not all(done(e) for e in tasks[i]['episode_ids'])]
     failures = 0
-    for index, task in enumerate(store.plan['tasks']):
-        if index % worker_count != worker_id:
-            continue
-        report(f'Task {index}: input={task["source"]}; episodes={task["episode_ids"]}')
-        check_inputs(task['inputs'])
-        pending = [i for i in task['episode_ids'] if store.state(i) is None]
+
+    def failed_this_round(episode_id):
+        try:
+            return (store.work / 'errors' / f'{episode_id}.err').stat().st_mtime >= round_started
+        except OSError:
+            return False
+
+    def convert(index):
+        task = tasks[index]
+        # Failures of this round wait for the next prepare; older ones are retried now.
+        pending = [i for i in task['episode_ids'] if store.state(i) is None and not failed_this_round(i)]
         if not pending:
-            continue
-        with tempfile.TemporaryDirectory(prefix=f'w{worker_id}-', dir=store.work / 'staging') as temporary:
+            return
+        report(f'Task {index}: input={task["source"]}; episodes={pending}')
+        check_inputs(task['inputs'])
+        with tempfile.TemporaryDirectory(prefix=f'{claims.owner}-', dir=store.work / 'staging') as temporary:
             def failed(episode_id, exc):
                 nonlocal failures
                 if isinstance(exc, StateError):
-                    raise exc
+                    raise exc  # includes AlreadyDone: never record another worker's success as a failure
                 failures += 1
                 report(f'Episode {episode_id} failed: {type(exc).__name__}: {exc}')
                 store.failure(episode_id, task['source'], exc)
@@ -408,7 +459,59 @@ def worker(output, worker_id, worker_count, *, report=None):
                 for episode_id in pending:
                     if store.state(episode_id) is None:
                         failed(episode_id, exc)
+
+    try:
+        first_pass = True
+        while waiting:
+            held_by_others = []
+            for index in waiting:
+                if claims.acquire(index) or (not first_pass and claims.take_over(index)):
+                    with claims.held(index):
+                        try:
+                            convert(index)
+                        except AlreadyDone as exc:
+                            # Two workers converted this task: one stalled past the heartbeat
+                            # limit and the other took it over. The first commit stands.
+                            report(f'Task {index}: finished by another worker: {exc}')
+                        except StateError as exc:
+                            if claims.owned(index):
+                                raise
+                            report(f'Task {index}: lost its claim to another worker: {exc}')
+                else:
+                    held_by_others.append(index)
+            # Stay until the tasks other workers hold are finished, to take over any they abandon.
+            waiting, first_pass = held_by_others, False
+            if waiting:
+                time.sleep(claim_files.POLL_S)
+    finally:
+        claims.close()
     return 1 if failures else 0
+
+
+def status(output):
+    """Progress of a conversion from its directory listings; safe while workers run."""
+    store = Store.load(output)
+    if store.output.exists():
+        print(f'Published: {store.output}', flush=True)
+        return
+    names = lambda folder, suffix: {n[:-len(suffix)] for n in os.listdir(store.work / folder) if n.endswith(suffix)}
+    recorded, errors = names('records', '.json'), names('errors', '.err') 
+    active = Claims(store.work / 'claims')
+    try:
+        claimed = active.active()
+    finally:
+        active.close()
+    total = len(store.ids)
+    failed = len(errors - recorded)
+    print(f'{len(recorded)}/{total} episodes recorded ({len(recorded) / total:.1%}), {failed} failed, '
+          f'{total - len(recorded) - failed} not done; {len(claimed)} tasks in progress', flush=True)
+    owners = Counter(owner.rsplit('-', 2)[0] for _, owner, _ in claimed)
+    for host, count in sorted(owners.items()):
+        print(f'  {host}: {count} task(s)', flush=True)
+    stale = [index for index, _, age in claimed if age >= claim_files.STALE_S]
+    if stale:
+        print(f'  {len(stale)} claim(s) without a heartbeat for {claim_files.STALE_S}s; a running worker will take them over',
+              flush=True)
 
 
 def finalize(output):
@@ -500,21 +603,36 @@ def main(argv=None):
         if name == 'run':
             launch.add_argument('--workers', type=int, default=1, help='local worker processes (default 1)')
         configuration.add_arguments(launch)
-    child = sub.add_parser('worker', help='convert the tasks assigned to one worker; launch with srun after prepare')
+    child = sub.add_parser('worker', help='claim and convert tasks until none is left; start any number, '
+                                          'anywhere, any time after prepare')
     child.add_argument('--output-dir', type=Path, required=True)
-    child.add_argument('--worker-id', type=int, help='default: $SLURM_PROCID')
-    child.add_argument('--worker-count', type=int, help='default: $SLURM_NTASKS')
+    child.add_argument('--processes', default='1',
+                       help="worker processes to run here: a number, or 'auto' for one per CPU this "
+                            'container is allowed (default 1)')
+    child.add_argument('--worker-id', type=int, help=argparse.SUPPRESS)
+    child.add_argument('--worker-count', type=int, help=argparse.SUPPRESS)
+    state = sub.add_parser('status', help='show progress; safe while workers run')
+    state.add_argument('--output-dir', type=Path, required=True)
     finish = sub.add_parser('finalize', help='check every episode and publish; one process after all workers exit')
     finish.add_argument('--output-dir', type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == 'worker':
             output = Path(args.output_dir).resolve()
+            processes = available_cpus() if args.processes == 'auto' else int(args.processes)
+            if processes < 1:
+                raise ValueError("--processes must be positive or 'auto'")
+            if processes > 1:
+                command = [sys.executable, '-m', 'loom_data', 'convert', 'worker', '--output-dir', str(output)]
+                return 1 if any(run_workers(command, processes)) else 0
             with worker_diagnostics(work_directory(output) / 'logs', f'output={output}') as report:
                 rank, count = worker_rank(args.worker_id, args.worker_count)
-                status = worker(args.output_dir, rank, count, report=report)
-                report(f'Worker exit code: {status}; episode errors: {work_directory(args.output_dir)}/errors/')
-                return status
+                code = worker(args.output_dir, rank, count, report=report)
+                report(f'Worker exit code: {code}; episode errors: {work_directory(args.output_dir)}/errors/')
+                return code
+        if args.command == 'status':
+            status(args.output_dir)
+            return 0
         if args.command == 'finalize':
             finalize(args.output_dir)
             return 0

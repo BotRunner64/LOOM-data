@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 
 from support import (MODELS, assert_conversion_fails, convert, datasets, manifest, read_export, video_means,
                      write_video)
+from loom_data import sync
 from loom_data.sources import molmoact2 as script
 from loom_data.robot.kinematics import fk_poses
 from loom_data.robot.urdf_model import parse_urdf
@@ -306,8 +307,9 @@ class MolmoAct2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             episode = make_source(root / 'raw', fps=25)
-            # No state between 40 ms and 300 ms: more than the 100 ms a frame may be interpolated across.
-            rewrite(episode / 'data.parquet', timestamp=np.array([2., 2.04, 2.30, 2.34], dtype=np.float32))
+            # No state for 100 ms longer than a frame may be interpolated across.
+            resume = 2.04 + sync.STATE_GAP_NS / 1e9 + .1
+            rewrite(episode / 'data.parquet', timestamp=np.array([2., 2.04, resume, resume + .04], dtype=np.float32))
             assert_conversion_fails(self, 'No episode was exported', 'molmoact2', root / 'raw', root / 'out')
             record = skip_record(root / 'out', episode.name, published=False)
             self.assertEqual((record['outcome'], record['reason']), ('skipped', 'sampling_gap'))

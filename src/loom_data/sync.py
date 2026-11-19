@@ -5,8 +5,8 @@ from loom_data.sources.policy import SourceDataError
 
 FPS = 30
 NS_PER_SECOND = 1_000_000_000
-STATE_GAP_NS = 100_000_000   # widest pair of state samples a frame may be interpolated across
-FRAME_GAP_NS = 50_000_000    # farthest RGB frame a frame time may take
+STATE_GAP_NS = 500_000_000   # widest pair of state samples a frame may be interpolated across
+FRAME_GAP_NS = 250_000_000   # farthest RGB frame a frame time may take; nearer gaps repeat frames
 
 
 def frame_ns(index):

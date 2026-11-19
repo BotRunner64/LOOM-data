@@ -11,6 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from support import assert_conversion_fails, convert, datasets, manifest, read_export, video_means, write_video
+from loom_data import sync
 from loom_data.convert import job
 from loom_data.sources import hifi_umi as script
 
@@ -417,9 +418,10 @@ class HifiUmiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shard = make_shard(root / 'raw')
-            # Episode 8 has no state between 40 ms and 300 ms: more than the 100 ms a frame may span.
+            # Episode 8 has no state for 100 ms longer than a frame may be interpolated across.
+            resume = 2.04 + sync.STATE_GAP_NS / 1e9 + .1
             rewrite(shard / 'data/chunk-002/file-003.parquet',
-                    timestamp=np.r_[row_times(4, 25), np.array([2., 2.04, 2.30, 2.34], dtype=np.float32)])
+                    timestamp=np.r_[row_times(4, 25), np.array([2., 2.04, resume, resume + .04], dtype=np.float32)])
             convert('hifi_umi', root / 'raw', root / 'out', **ZERO_OFFSETS)
             self.assertEqual(manifest(root / 'out'), [{'episode_id': 'chunk_0000_part_0000_episode_000007'}])
             record = skip_record(root / 'out', 'chunk_0000_part_0000_episode_000008')

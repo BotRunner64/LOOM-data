@@ -58,6 +58,12 @@ class CameraContractTests(unittest.TestCase):
     def test_resolution_follows_the_aspect_ratio_and_layout_names_are_deterministic(self):
         self.assertEqual([contract.export_size(*size) for size in ((640, 480), (1920, 1200), (640, 360), (1600, 1300), (320, 240))],
                          [(640, 480), (640, 400), (640, 360), (640, 520), (640, 480)])
+        # 53:30 has no whole height at width 640, so it keeps its native resolution.
+        self.assertEqual(contract.export_size(848, 480), (848, 480))
+        self.assertEqual(contract.layout_name(cameras := ['left_wrist', 'right_wrist', 'top'], {c: [848, 480] for c in cameras}),
+                         'top+left_wrist+right_wrist_848x480')
+        for ratio, (width, height) in contract.RESOLUTIONS.items():
+            self.assertEqual((width * ratio[1], height % 2), (height * ratio[0], 0))
         for size in ((32, 32), (640, 0), (1280, 1024)):
             with self.subTest(size=size), self.assertRaises(ValueError):
                 contract.export_size(*size)
@@ -129,17 +135,22 @@ class HifiShardTests(unittest.TestCase):
             from loom_data.sources import hifi_umi
             extract = hifi_umi.extract_video_segment
 
-            def interrupted(video, *args):
-                if video['from_timestamp'] > 0:
+            def interrupted(video, target, *args):
+                # The second episode of the first shard only; a worker converts every shard it can claim.
+                if video['from_timestamp'] > 0 and 'chunk_0000' in str(target):
                     raise ValueError('transient decode error')
-                return extract(video, *args)
+                return extract(video, target, *args)
 
-            with patch.object(hifi_umi, 'extract_video_segment', side_effect=interrupted):
+            with patch.object(hifi_umi, 'extract_video_segment', side_effect=interrupted) as attempts:
                 self.assertEqual(parallel.worker(output, 0, 2), 1)
-            self.assertEqual(parallel.worker(output, 1, 2), 0)
+                failed_calls = attempts.call_count
+                # The failure belongs to this round: another worker leaves it for the next prepare.
+                self.assertEqual(parallel.worker(output, 1, 2), 0)
+                self.assertEqual(attempts.call_count, failed_calls)
             committed = 'chunk_0000_part_0000_episode_000007'
             self.assertIsNotNone(store.state(committed))
             self.assertIsNone(store.state('chunk_0000_part_0000_episode_000008'))
+            self.assertEqual(list((store.work / 'claims').iterdir()), [])
             self.assertFalse(any((store.work / 'staging').iterdir()))
             parallel.prepare(config, output)
             self.assertIsNotNone(store.state(committed))
@@ -254,15 +265,42 @@ class ResumeTests(unittest.TestCase):
         output = self.root / 'many'
         store = parallel.prepare(self.config, output)
         self.assertEqual(len(store.ids), 35)
-        self.assertEqual(parallel.worker(output, 0, 32), 0)
-        before = {p: p.stat().st_mtime_ns for p in (store.dataset / 'episodes').rglob('*') if p.is_file()}
-        self.assertEqual(len(list((store.dataset / 'episodes').iterdir())), 2)
+        episodes = store.dataset / 'episodes'
+        convert = HifiUmi.episode
+
+        def killed_after(commits):
+            # A worker of any rank converts whatever it can claim, so each run is cut short by dying.
+            calls = []
+
+            def episode(adapter, task, destination):
+                if len(calls) == commits:
+                    raise KeyboardInterrupt('simulated worker death')
+                calls.append(destination.name)
+                return convert(adapter, task, destination)
+            return patch.object(HifiUmi, 'episode', episode)
+
+        with killed_after(2), self.assertRaises(KeyboardInterrupt):
+            parallel.worker(output, 0, 32)
+        self.assertEqual(sorted(p.name for p in episodes.iterdir()), store.ids[:2])
+        before = {p: p.stat().st_mtime_ns for p in episodes.rglob('*') if p.is_file()}
         parallel.prepare(self.config, output)
-        for rank in (0, 1, 2):
-            self.assertEqual(parallel.worker(output, rank, 8), 0)
+        # The rank only chooses where a worker starts: 5/8 of the way into the 35 tasks.
+        with killed_after(10), self.assertRaises(KeyboardInterrupt):
+            parallel.worker(output, 5, 8)
+        self.assertEqual(sorted(p.name for p in episodes.iterdir()), sorted(store.ids[:2] + store.ids[21:31]))
+        before.update({p: p.stat().st_mtime_ns for p in episodes.rglob('*') if p.is_file()})
+        self.assertEqual(list((store.work / 'claims').iterdir()), [])  # a dying worker releases its claim
         parallel.prepare(self.config, output)
-        for rank in range(3):
-            self.assertEqual(parallel.worker(output, rank, 3), 0)
+        converted = []
+
+        def counted(adapter, task, destination):
+            converted.append(destination.name)
+            return convert(adapter, task, destination)
+
+        with patch.object(HifiUmi, 'episode', counted):
+            for rank in range(3):
+                self.assertEqual(parallel.worker(output, rank, 3), 0)
+        self.assertEqual(sorted(converted), sorted(set(store.ids) - set(store.ids[:2] + store.ids[21:31])))
         self.assertTrue(all(p.stat().st_mtime_ns == stamp for p, stamp in before.items()))
         parallel.finalize(output)
         records = manifest(output)
@@ -308,9 +346,20 @@ class ResumeTests(unittest.TestCase):
         add_hifi_episode(self.source, 8)
         output = self.root / 'skip_failed'
         store = parallel.prepare(self.config, output)
-        with patch.object(HifiUmi, 'episode', side_effect=ValueError('bad source')):
+        convert = HifiUmi.episode
+        attempts = []
+
+        def bad_first(adapter, task, destination):
+            attempts.append(destination.name)
+            if destination.name == self.episode_id:
+                raise ValueError('bad source')
+            return convert(adapter, task, destination)
+
+        with patch.object(HifiUmi, 'episode', bad_first):
             self.assertEqual(parallel.worker(output, 0, 2), 1)
-        self.assertEqual(parallel.worker(output, 1, 2), 0)
+            # Within one round the failure is not attempted again by another worker.
+            self.assertEqual(parallel.worker(output, 1, 2), 0)
+        self.assertEqual(sorted(attempts), [self.episode_id, 'episode_000008'])
         parallel.finalize(output)
         self.assertEqual([r['episode_id'] for r in manifest(output)], ['episode_000008'])
         self.assertTrue((store.work / 'errors' / f'{self.episode_id}.err').is_file())
@@ -469,18 +518,38 @@ class ResumeTests(unittest.TestCase):
                 self.assertIn(expected, text)
         self.assertEqual(list((self.store.work / 'errors').iterdir()), [])
 
-    def test_cli_missing_slurm_environment_is_logged_before_worker_starts(self):
+    def test_cli_worker_needs_no_rank_but_needs_a_prepared_output(self):
         output = self.root / 'not_prepared'
         env = {k: v for k, v in os.environ.items() if not k.startswith('SLURM_')}
-        result = subprocess.run(
-            [sys.executable, '-m', 'loom_data', 'convert', 'worker', '--output-dir', str(output)],
-            env=env, cwd=paths.ROOT, capture_output=True, text=True, timeout=60, check=False)
+
+        def worker():
+            return subprocess.run(
+                [sys.executable, '-m', 'loom_data', 'convert', 'worker', '--output-dir', str(output)],
+                env=env, cwd=paths.ROOT, capture_output=True, text=True, timeout=60, check=False)
+
+        work = output.with_name(output.name + '.work')
+        result = worker()
         self.assertEqual(result.returncode, 1, result.stderr)
-        log, = output.with_name(output.name + '.work').glob('logs/worker-*.err')
-        self.assertIn("KeyError: 'SLURM_PROCID'", log.read_text())
+        log, = work.glob('logs/worker-*.err')
+        self.assertIn('StateError: Cannot read', log.read_text())
+        self.assertIn('plan.json', log.read_text())
         self.assertIn('Traceback', log.read_text())
         # A diagnostics-only directory must not prevent a subsequent prepare.
         parallel.prepare(self.config, output)
+        # A plan without the round marker (prepared by an older version) is refused, not half-run.
+        (work / 'round').unlink()
+        result = worker()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Run prepare before starting workers', result.stderr)
+        parallel.prepare(self.config, output)
+        # Neither a rank nor SLURM is required: a lone worker converts the whole plan.
+        result = worker()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        log, = work.glob('logs/worker-*.err')
+        self.assertIn('Worker 0/1', log.read_text())
+        self.assertIn('Worker exit code: 0', log.read_text())
+        parallel.finalize(output)
+        self.assertEqual(len(manifest(output)), 1)
 
     def test_cli_dependency_failure_and_interrupt_are_logged(self):
         code = '''
@@ -565,14 +634,27 @@ with patch.object(parallel, 'atomic_json', side_effect=committed_record):
         self.assertEqual(cli(prepare_args).returncode, 0)
         worker_args = ['worker', '--output-dir', str(output)]
         finalize_args = ['finalize', '--output-dir', str(output)]
-        self.assertEqual(cli(worker_args, rank=0, count=2).returncode, 0)
+        # Finalize refuses while episodes are unfinished, whoever was supposed to convert them.
         self.assertNotEqual(cli(finalize_args).returncode, 0)
         self.assertFalse(output.exists())
+        status = cli(['status', '--output-dir', str(output)])
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn('0/2 episodes recorded (0.0%), 0 failed, 2 not done; 0 tasks in progress', status.stdout)
+        # Ranks come from srun's environment; whichever rank runs first converts what it can claim.
+        first = cli(worker_args, rank=1, count=2)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual([line for line in first.stdout.splitlines() if line.startswith('Committed')],
+                         ['Committed episode_000008', 'Committed episode_000007'])  # rank 1 of 2 starts halfway
+        self.assertNotIn('Committed', cli(worker_args, rank=0, count=2).stdout)
         self.assertEqual(cli(prepare_args).returncode, 0)
         for rank in range(3):
             result = cli(worker_args, rank=rank, count=3)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('Committed', result.stdout)
+        self.assertIn('2/2 episodes recorded (100.0%), 0 failed, 0 not done; 0 tasks in progress',
+                      cli(['status', '--output-dir', str(output)]).stdout)
         self.assertEqual(cli(finalize_args).returncode, 0)
+        self.assertEqual(cli(['status', '--output-dir', str(output)]).stdout.strip(), f'Published: {output}')
         self.assertEqual(len(manifest(output)), 2)
         before = {p: p.stat().st_mtime_ns for p in output.rglob('*') if p.is_file()}
         self.assertEqual(cli(prepare_args).returncode, 0)
@@ -624,14 +706,19 @@ class SourceTests(unittest.TestCase):
                       [p['path'] for p in store.plan['shared_inputs']])
         convert = molmoact2.DatasetReader.convert_episode
 
+        attempts = []
+
         def interrupted(reader, index, *args):
+            attempts.append(index)
             if index == 8:
                 raise ValueError('transient AV1 error')
             return convert(reader, index, *args)
 
         with patch.object(molmoact2.DatasetReader, 'convert_episode', interrupted):
-            self.assertEqual(parallel.worker(output, 0, 2), 0)
-            self.assertEqual(parallel.worker(output, 1, 2), 1)
+            # The first worker claims every task; the failure is its own, and is not retried in this round.
+            self.assertEqual(parallel.worker(output, 0, 2), 1)
+            self.assertEqual(parallel.worker(output, 1, 2), 0)
+        self.assertEqual(sorted(attempts), [7, 8, 9])
         self.assertIsNotNone(store.state('episode_000007'))
         self.assertIsNotNone(store.state('episode_000009'))
         self.assertIsNone(store.state('episode_000008'))

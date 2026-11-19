@@ -184,8 +184,14 @@ class NativeDropTests(unittest.TestCase):
                 summary=json.loads((root/'out.work/conversion_summary.json').read_text())
                 self.assertEqual((summary['failed'],summary['dropped']),(1,0))
                 self.assertFalse((root/'out').exists())
+                # Within the round the failure stands; the next prepare makes it retryable.
+                with patch.object(beta,'convert_episode',side_effect=AssertionError('one attempt per round')):
+                    self.assertEqual(parallel.worker(root/'out',0,1),0)
+                self.assertIsNone(store.state(store.ids[0]))
+                parallel.prepare(config,root/'out')
                 self.assertEqual(parallel.worker(root/'out',0,1),0)
                 parallel.finalize(root/'out')
+                self.assertEqual(manifest(root/'out'),[{'episode_id':store.ids[0]}])
 
     def test_finalize_omits_recorded_failures_and_remains_idempotent(self):
         for error in (ValueError('unexpected converter bug'),OSError(errno.ENOSPC,'disk full'),ImportError('missing codec')):
@@ -241,14 +247,16 @@ class NativeDropTests(unittest.TestCase):
     def test_finalize_refuses_to_publish_when_nothing_was_exported(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);mcap(root,'clean_bowl')
-            store=parallel.prepare(make_config('realomin',root/'raw', eef_offset=[0., 0., 0.]),root/'out')
+            config=make_config('realomin',root/'raw', eef_offset=[0., 0., 0.])
+            store=parallel.prepare(config,root/'out')
             with patch.object(realomin,'convert_episode',side_effect=OSError(errno.ENOSPC,'disk full')):
                 self.assertEqual(parallel.worker(root/'out',0,1),1)
             with self.assertRaisesRegex(parallel.StateError,'nothing to publish'):parallel.finalize(root/'out')
             self.assertFalse((root/'out').exists());self.assertFalse(store.published())
             s=summary(root/'out')
             self.assertEqual((s['exported'],s['failed'],s['dropped'],s['unfinished']),(0,1,0,0))
-            # The failure stays retryable: a rerun converts the episode and publishes.
+            # The failure stays retryable: a rerun (prepare, then workers) converts the episode and publishes.
+            parallel.prepare(config,root/'out')
             with reading(on_grid(3)):
                 self.assertEqual(parallel.worker(root/'out',0,1),0)
             parallel.finalize(root/'out')

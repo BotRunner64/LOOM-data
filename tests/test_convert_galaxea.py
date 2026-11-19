@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 
 import support
 from support import MODELS, assert_conversion_fails, datasets, episode_errors, read_export, video_means, write_video
+from loom_data import sync
 from loom_data.convert import job
 from loom_data.sources.galaxea import (
     DEFAULT_EEF_OFFSETS, TOOL_AXES, Galaxea, GalaxeaKinematics,
@@ -334,8 +335,9 @@ class GalaxeaExportTests(unittest.TestCase):
         self.assertEqual(sorted(tasks.values()), sorted([WHOLE, 'Pick', 'Place']))
 
     def test_a_gap_in_the_source_rows_is_skipped_with_a_reason(self):
-        # 15 fps rows with three rows missing: frames inside the 267 ms hole have no state to interpolate.
-        write_task(self.source/'r1pro', 'r1pro', fps=15, timestamps=[10. + i/15 for i in (0, 1, 5, 6)],
+        # 15 fps rows with a hole wider than the state limit: frames inside it have no state to interpolate.
+        hole = sync.STATE_GAP_NS * 15 // sync.NS_PER_SECOND + 2
+        write_task(self.source/'r1pro', 'r1pro', fps=15, timestamps=[10. + i/15 for i in (0, 1, 1 + hole, 2 + hole)],
                    grippers=(0.,)*4)
         output = self.root/'export'
         self.assertEqual(convert(self.source, output), 1)

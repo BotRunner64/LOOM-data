@@ -59,13 +59,14 @@ loom-data convert run --dataset abc130k --workers 8
 这一条命令依次完成准备计划、启动 8 个本地进程转换、核对并发布。输入默认 `dataset/raw/<数据集名>/`，输出默认 `dataset/export/<数据集名>/`。
 
 - **中断后重跑同一条命令即可续跑**，已完成的 episode 不会重转。可以换 `--workers` 数量。
+- 转换过程中用 `loom-data convert status --output-dir ...` 看进度：已完成、失败、未完成的数量，以及各机器正在处理的任务数。
 - 导出目录只在全部完成后才出现；过程中的数据在工作目录里。
 - 转换器自动按相机集合和分辨率把 episode 分到各布局的数据集里，例如
   `dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480/`。发布时打印每个布局的 episode 数和帧数。
 - 每个 worker 的编解码都是单线程，提速靠增加 worker 数。
 - 设置 `LOOM_DATA_NO_PROGRESS=1` 关闭进度条。
 
-### Slurm
+### 多机并行
 
 调度由你控制，按顺序执行三步：
 
@@ -74,16 +75,23 @@ loom-data convert run --dataset abc130k --workers 8
 loom-data convert prepare --dataset abc130k \
   --input-dir dataset/raw/ABC-130K --output-dir dataset/export/ABC-130K
 
-# 2. 用 srun 一次拉起全部 worker；每个 worker 从 SLURM_PROCID / SLURM_NTASKS 得知自己的分工
-srun loom-data convert worker --output-dir dataset/export/ABC-130K
+# 2. 在任意多台机器上启动 worker，每台都是同一条命令
+loom-data convert worker --output-dir dataset/export/ABC-130K --processes auto
 
 # 3. 所有 worker 退出后，核对并发布，单进程运行一次
 loom-data convert finalize --output-dir dataset/export/ABC-130K
 ```
 
-各节点要能访问同一个 Python 环境、源数据和输出盘。可以从 `--nodes=2 --ntasks=32 --cpus-per-task=1` 起步，按内存和共享盘吞吐调整。重新执行这三步就是续跑，worker 数可以变。
+worker 之间没有固定分工，也不需要知道彼此的存在：每个 worker 在共享文件系统上认领一个任务，转完再认领下一个，没有可做的任务时自己退出。因此：
 
-**同一个输出同时只能有一个作业。** 重跑前，上一轮的所有 worker 必须已经退出。
+- **worker 可以随时增加。** 先启动的先干活，后加入的接着领剩下的任务。集群紧张时有多少空位就开多少。
+- **worker 挂掉不需要人工处理。** 干活的 worker 每分钟更新一次自己的认领标记；标记超过 10 分钟没更新，其他还在运行的 worker 会接手那个任务。
+- `--processes auto` 按容器的 CPU 限额决定本机开几个 worker 进程；也可以写具体数字，默认 1。
+- 本轮失败的 episode 不会被别的 worker 反复重试，下一次 `prepare` 之后才重试。
+
+各机器要能访问同一个 Python 环境、源数据和输出盘。Slurm 上用 `srun loom-data convert worker --output-dir ...` 一次拉起全部 worker；交互式实例上把第 2 步的命令作为启动后命令即可。
+
+重新执行这三步就是续跑。**`prepare` 和 `finalize` 运行时不能有 worker 在跑**：`prepare` 会清掉上一轮遗留的认领标记和暂存文件。
 
 ### 选择要转换的数据
 
@@ -126,6 +134,7 @@ loom-data convert finalize --output-dir dataset/export/ABC-130K
 
 ```text
 plan.json                  固定的配置、任务清单和输入文件指纹
+claims/<任务序号>           正在处理该任务的 worker 的认领标记
 records/<episode_id>.json  一个已导出或已跳过的 episode
 errors/<episode_id>.err    未完成 episode 最近一次的失败信息
 logs/worker-*.err          每个 worker 的启动和运行日志（成功也会有）

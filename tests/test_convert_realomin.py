@@ -10,7 +10,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from support import assert_conversion_fails, convert, datasets, episode_errors, read_export, video_means
-from loom_data import contract
+from loom_data import contract, sync
 from loom_data.sources import realomin as script
 from loom_data.geometry import tool_transform
 from loom_data.sources.policy import SourceDataError
@@ -217,13 +217,18 @@ class RealOminTests(unittest.TestCase):
         states = {**{topic: still(FRAME[:4]) for topic in EEF.values()},
                   **{topic: open_(FRAME[:4]) for topic in GRIPPER.values()}}
         cameras = {topic: FRAME[:4] for topic in CAMERA.values()}
+        # Frame times spanning a little over twice the RGB limit.
+        span = [frame_ns(k) for k in range(2 * sync.FRAME_GAP_NS * sync.FPS // sync.NS_PER_SECOND + 4)]
         long = {**{topic: still(FRAME[:6]) for topic in EEF.values()}, **{topic: open_(FRAME[:6]) for topic in GRIPPER.values()}}
         episodes = {
             'good': on_grid(4),
-            # Two pose samples 150 ms apart with frame times between them.
-            'state_gap': episode({**long, EEF['right']: still([0, 150*MS])}, {topic: FRAME[:6] for topic in cameras}),
-            # The frame at 67 ms has no left camera frame within 50 ms.
-            'rgb_gap': episode(states, {**cameras, CAMERA['left']: [0, 120*MS]}),
+            # Two pose samples farther apart than the state limit, with frame times between them.
+            'state_gap': episode({**long, EEF['right']: still([0, sync.STATE_GAP_NS + 50*MS])},
+                                 {topic: FRAME[:6] for topic in cameras}),
+            # The left camera has only the first and last frame: those midway are beyond the RGB limit of both.
+            'rgb_gap': episode({**{topic: still(span) for topic in EEF.values()},
+                                **{topic: open_(span) for topic in GRIPPER.values()}},
+                               {**{topic: span for topic in cameras}, CAMERA['left']: [span[0], span[-1]]}, step=10),
             # The right camera starts after the state ends.
             'disjoint': episode(states, {**cameras, CAMERA['right']: [FRAME[5], FRAME[6]]}),
         }

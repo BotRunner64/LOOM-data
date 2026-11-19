@@ -29,6 +29,10 @@ class StateError(ValueError):
     """Inconsistent recovery state: never overwrite or silently skip it."""
 
 
+class AlreadyDone(StateError):
+    """Another worker finished this episode first; its result stands and ours is discarded."""
+
+
 def progress(label, total=None, *, unit='item'):
     """Use tqdm on stderr, refreshing redirected logs less frequently."""
     terminal = sys.stderr.isatty()
@@ -159,10 +163,21 @@ def worker_diagnostics(directory, label):
 
 
 def worker_rank(worker_id, worker_count):
-    """Explicit rank, or the one srun assigns to each task."""
-    rank = worker_id if worker_id is not None else int(os.environ['SLURM_PROCID'])
-    count = worker_count if worker_count is not None else int(os.environ['SLURM_NTASKS'])
+    """Explicit rank, the one srun assigns to each task, or a lone worker."""
+    rank = worker_id if worker_id is not None else int(os.environ.get('SLURM_PROCID', 0))
+    count = worker_count if worker_count is not None else int(os.environ.get('SLURM_NTASKS', 1))
     return rank, count
+
+
+def available_cpus():
+    """CPUs this process may use: the container's cgroup limit, not the host's core count."""
+    try:
+        quota, period = Path('/sys/fs/cgroup/cpu.max').read_text().split()
+        if quota != 'max':
+            return max(1, int(quota) // int(period))
+    except (OSError, ValueError):
+        pass
+    return len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count() or 1
 
 
 def run_workers(command, workers):

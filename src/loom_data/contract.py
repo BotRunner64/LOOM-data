@@ -44,9 +44,10 @@ STATE_COMPONENTS = tuple(
     for name in (*(f'{side}_eef.{c}' for c in POSE_COMPONENTS), f'{side}_gripper.openness'))
 STATE = pa.list_(pa.float32(), STATE_DIM)
 
-# Export width is always 640; the height follows the source aspect ratio (section 5).
-WIDTH = 640
-RESOLUTIONS = {(4, 3): (640, 480), (16, 9): (640, 360), (8, 5): (640, 400), (16, 13): (640, 520)}
+# One export resolution per aspect ratio (section 5): width 640 where that gives a whole,
+# even height; a ratio that does not scale to one keeps its native resolution.
+RESOLUTIONS = {(4, 3): (640, 480), (16, 9): (640, 360), (8, 5): (640, 400), (16, 13): (640, 520),
+               (53, 30): (848, 480)}
 
 FRAMES = 'frames.parquet'
 FRAME_SCHEMA = pa.schema([pa.field(STATE_KEY, STATE, nullable=False),
@@ -117,7 +118,7 @@ def seconds_to_ns(seconds):
 
 
 def export_size(width, height):
-    """Export resolution of a source frame: scaled to width 640, aspect ratio kept."""
+    """Export resolution of a source frame: the one registered for its aspect ratio."""
     if type(width) is not int or type(height) is not int or width < 1 or height < 1:
         raise ValueError(f'Invalid source frame size: {width}x{height}')
     ratio = Fraction(width, height)
