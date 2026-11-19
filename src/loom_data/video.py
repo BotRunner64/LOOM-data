@@ -9,6 +9,9 @@ from fractions import Fraction
 import math
 import os
 from pathlib import Path
+import queue
+import tempfile
+import threading
 
 import numpy as np
 
@@ -52,6 +55,59 @@ def configure_codec(context):
                                'threads=1:lookahead-threads=1:sync-lookahead=0'}
 
 
+class _EpisodeEncoder:
+    """Use LeRobot 0.4.4's MP4 writer with backpressure for offline conversion."""
+
+    def __init__(self, path):
+        # StreamingVideoEncoder.feed_frame drops frames when the queue is full.
+        # Its per-camera writer accepts a queue, so offline producers can wait.
+        from lerobot.datasets.video_utils import _CameraEncoderThread
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=path.parent)
+        self.path = path
+        self.pending = Path(self.temp.name) / 'video.mp4'
+        self.frames = queue.Queue(maxsize=2)
+        self.result = queue.Queue()
+        self.stop = threading.Event()
+        self.worker = _CameraEncoderThread(
+            video_path=self.pending, fps=sync.FPS, vcodec='h264', pix_fmt='yuv420p',
+            g=contract.VIDEO_GOP, crf=18, preset=None, frame_queue=self.frames,
+            result_queue=self.result, stop_event=self.stop,
+            encoder_threads=1 if os.environ.get('LOOM_DATA_SERIAL_CODECS') == '1' else None)
+        self.worker.start()
+
+    def _check_result(self):
+        try:
+            status, detail = self.result.get_nowait()
+        except queue.Empty as exc:
+            raise RuntimeError(f'{self.path}: LeRobot encoder exited without a result') from exc
+        if status != 'ok':
+            raise RuntimeError(f'{self.path}: LeRobot encoding failed: {detail}')
+
+    def put(self, frame):
+        while self.worker.is_alive():
+            try:
+                self.frames.put(frame, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+        self._check_result()
+        raise RuntimeError(f'{self.path}: LeRobot encoder stopped before the last frame')
+
+    def finish(self):
+        self.put(None)
+        self.worker.join()
+        self._check_result()
+        self.pending.replace(self.path)
+        self.temp.cleanup()
+
+    def close(self):
+        self.stop.set()
+        self.worker.join()
+        self.temp.cleanup()
+
+
 class FrameSink:
     """Encode source frames, given in display order, onto the 30 fps frame sequence.
 
@@ -60,41 +116,34 @@ class FrameSink:
     source that already is the frame sequence through one to one.
     """
     def __init__(self, path, times, grid=None):
-        import av
+        self.path = path
         self.times = [int(t) for t in times]
         self.select = (np.arange(len(self.times)) if grid is None else sync.nearest(self.times, grid))
         self.count = self.written = 0
-        self.stream = self.source_size = None
+        self.encoder = self.source_size = self.size = None
         self.moments = contract.Moments()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.output = av.open(str(path), 'w')
 
     def add(self, frame):
         index = self.count
         self.count += 1
         if index >= len(self.times):
             raise SourceDataError('video_frame_count', f'Decoded more than the expected {len(self.times)} frames')
-        if self.stream is None:
+        if self.encoder is None:
             self.source_size = (frame.width, frame.height)
-            self.stream = self.output.add_stream('libx264', rate=sync.FPS)
-            self.stream.width, self.stream.height = contract.export_size(*self.source_size)
-            self.stream.pix_fmt = 'yuv420p'
-            self.stream.options = {'crf': '18', 'preset': 'fast'}
-            configure_codec(self.stream.codec_context)
+            self.size = contract.export_size(*self.source_size)
+            self.encoder = _EpisodeEncoder(self.path)
         elif (frame.width, frame.height) != self.source_size:
             raise SourceDataError('invalid_video', 'Video resolution changed within episode')
-        scaled = None
+        scaled = rgb = None
         while self.written < len(self.select) and self.select[self.written] == index:
             if scaled is None:
-                scaled = frame.reformat(width=self.stream.width, height=self.stream.height, format='yuv420p')
+                scaled = frame.reformat(width=self.size[0], height=self.size[1], format='yuv420p')
+                rgb = scaled.to_ndarray(format='rgb24')
             if self.written % sync.FPS == 0:  # one frame per second feeds the image statistics
-                pixels = scaled.reformat(width=160, height=max(2, self.stream.height // 4),
+                pixels = scaled.reformat(width=160, height=max(2, self.size[1] // 4),
                                          format='rgb24').to_ndarray().reshape(-1, 3) / 255.
                 self.moments.add_values(pixels)
-            scaled.pts = self.written
-            scaled.time_base = Fraction(1, sync.FPS)
-            for packet in self.stream.encode(scaled):
-                self.output.mux(packet)
+            self.encoder.put(rgb)
             self.written += 1
 
     def finish(self):
@@ -102,16 +151,15 @@ class FrameSink:
         if self.count != len(self.times) or self.written != len(self.select) or not self.written:
             raise SourceDataError('video_frame_count',
                                   f'Decoded {self.count} frames; expected {len(self.times)}')
-        for packet in self.stream.encode():
-            self.output.mux(packet)
-        self.output.close()
+        self.encoder.finish()
         m = self.moments
-        return {'size': [self.stream.width, self.stream.height],
+        return {'size': list(self.size),
                 'stats': {'min': m.low.tolist(), 'max': m.high.tolist(), 'sum': m.total.tolist(),
                           'sumsq': m.squares.tolist(), 'count': m.count}}
 
     def close(self):
-        self.output.close()
+        if self.encoder is not None:
+            self.encoder.close()
 
 
 def encode_frames(path, frames, times, grid=None):

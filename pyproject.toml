@@ -5,12 +5,14 @@ description = "Convert robot datasets to one export contract, then check and vie
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "av>=18.1",
+    "av>=15,<16",
+    "lerobot==0.4.4",
     "mcap>=1.2",
     "mcap-protobuf-support>=0.5",
     "numpy>=1.24",
     "h5py>=3.10",
-    "huggingface-hub>=1.0,<2.0",
+    "huggingface-hub>=0.34.2,<0.36",
+    "requests[socks]>=2.32,<3",
     "httpx[socks]>=0.28.1,<1.0",
     "pyarrow>=15",
     "tqdm>=4.66",

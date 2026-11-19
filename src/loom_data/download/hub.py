@@ -32,11 +32,13 @@ def configure_hub() -> None:
 def retry(operation: Callable[[], T], retries: int) -> T:
     """Retry transient HTTP/network errors; do not retry authentication failures."""
     import httpx
+    import requests
 
     for attempt in range(retries + 1):
         try:
             return operation()
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        except (httpx.TransportError, httpx.HTTPStatusError, requests.ConnectionError,
+                requests.Timeout, requests.HTTPError, requests.exceptions.ChunkedEncodingError) as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status is not None and status not in (408, 429) and status < 500:
                 raise

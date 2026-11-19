@@ -24,7 +24,8 @@ from loom_data import sync
 from loom_data.sync import FPS, frame_ns
 
 # Recorded in resume plans to prevent mixing incompatible exports.
-VERSION = 4
+VERSION = 5
+VIDEO_GOP = 2
 
 SIDES = ('left', 'right')
 STATE_NAMES = ('left_eef', 'right_eef', 'left_gripper', 'right_gripper')
