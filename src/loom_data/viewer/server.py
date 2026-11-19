@@ -214,6 +214,8 @@ def serve(root, host, port, anomalies_path=None):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
+        # Send frame bodies immediately after the headers on persistent connections.
+        disable_nagle_algorithm = True
 
         def reply(self, status, body, content_type):
             try:

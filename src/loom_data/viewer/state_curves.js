@@ -51,16 +51,16 @@ function niceValue(value) {
 }
 
 export class StateCurves {
-  constructor(canvas, controls, status, onSeek) {
+  constructor(canvas, controls, status, marker, onSeek) {
     this.canvas = canvas;
     this.controls = controls;
     this.status = status;
+    this.marker = marker;
     this.onSeek = onSeek;
     this.focusedStreamName = null;
     this.context = canvas.getContext('2d');
     canvas.tabIndex = 0;
     canvas.title = 'Click or drag to seek; use Left/Right arrows to step the focused state stream';
-    this.currentNs = 0;
     this.dragging = false;
     this.onPointer = event => {
       if (!this.episode || (event.type === 'pointermove' && !this.dragging)) return;
@@ -97,11 +97,11 @@ export class StateCurves {
   }
 
   setCurrentTime(value) {
-    this.currentNs = value;
     if (this.episode) {
+      this.marker.hidden = false;
+      this.marker.style.left = `${100 * value / Math.max(1, this.episode.end_ns)}%`;
       this.status.textContent = `${(value / 1e9).toFixed(2)} / ${(this.episode.end_ns / 1e9).toFixed(2)} s`;
     }
-    this.draw();
   }
 
   renderControls() {
@@ -204,9 +204,6 @@ export class StateCurves {
       if (last >= 0 && Number.isFinite(trace.values[last])) ctx.lineTo(x(trace.times[last]), y(trace.values[last]));
       ctx.stroke();
     }
-    const marker = x(this.currentNs);
-    ctx.strokeStyle = '#ff8a4c'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(marker, top); ctx.lineTo(marker, bottom); ctx.stroke();
     ctx.restore();
   }
 }
