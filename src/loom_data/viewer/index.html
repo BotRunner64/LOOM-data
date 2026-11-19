@@ -55,9 +55,9 @@
   .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-bottom: 8px; }
   #camera-name { color: var(--muted); font-size: 14px; font-weight: 500; margin-left: 8px; }
   .camera { display: block; width: 100%; padding: 0; text-align: left; border: 0; background: transparent; color: inherit; }
-  .camera img { display: block; width: 100%; aspect-ratio: auto 4 / 3; object-fit: contain; background: #0b1018; border-radius: 9px; }
+  .camera :is(img, video) { display: block; width: 100%; aspect-ratio: auto 4 / 3; object-fit: contain; background: #0b1018; border-radius: 9px; }
   .camera.primary { cursor: default; }
-  .camera.primary img { max-height: clamp(300px, 48vh, 540px); }
+  .camera.primary :is(img, video) { max-height: clamp(300px, 48vh, 540px); }
   .camera.primary:disabled { opacity: 1; color: inherit; }
   .camera-title { display: block; margin: 4px 0 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
   .camera.primary .camera-title { display: none; }
@@ -69,8 +69,8 @@
   .filmstrip .camera { flex: 0 0 clamp(100px, 17vw, 144px); }
   .filmstrip:empty { display: none; }
   .camera.secondary { cursor: pointer; border-radius: 10px; }
-  .camera.secondary img { border: 2px solid transparent; }
-  .camera.secondary:hover img { border-color: var(--accent); }
+  .camera.secondary :is(img, video) { border: 2px solid transparent; }
+  .camera.secondary:hover :is(img, video) { border-color: var(--accent); }
   .video-panel { container-type: inline-size; }
   .curve-panel { display: flex; flex-direction: column; }
   .curve-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
@@ -160,10 +160,10 @@
     .panel-heading { margin-bottom: 6px; }
     .video-content, #primaryCamera, .camera.primary, .pose { display: flex; flex-direction: column; min-height: 0; }
     .video-content, #primaryCamera, .camera.primary, .poses, .pose-viewport { flex: 1; min-height: 0; }
-    .camera.primary img { flex: 1; height: 0; min-height: 0; max-height: none; }
+    .camera.primary :is(img, video) { flex: 1; height: 0; min-height: 0; max-height: none; }
     .filmstrip { flex: none; }
     .filmstrip .camera { flex-basis: clamp(84px, 16vh, 152px); }
-    .filmstrip img { height: clamp(56px, 10vh, 98px); }
+    .filmstrip :is(img, video) { height: clamp(56px, 10vh, 98px); }
     .curve-chart { min-height: 90px; }
     .curve-controls { min-height: 0; overflow: auto; }
     .poses { gap: 10px; }
@@ -178,7 +178,7 @@
     .video-content { flex-direction: row; }
     .filmstrip { flex-direction: column; flex-basis: 22%; overflow: auto; }
     .filmstrip .camera { flex: none; }
-    .filmstrip img { height: auto; }
+    .filmstrip :is(img, video) { height: auto; }
   }
   @media (max-width: 699px) {
     .curve-chart { min-height: 0; flex: none; height: clamp(210px, 33vw, 300px); }
@@ -193,6 +193,8 @@
     .poses { grid-template-columns: minmax(0, 1fr); }
     .pose + .pose { border-top: 1px solid var(--line); padding-top: 12px; }
   }
+  .camera video, .camera.show-video img { display: none; }
+  .camera.show-video video { display: block; }
 </style>
 <div class="app">
   <header class="masthead">
@@ -287,7 +289,8 @@ import {EpisodeBrowser} from './episodes.js';
 const $ = id => document.getElementById(id);
 let data = null, currentNs = 0, playing = false, playbackOriginMs = 0, generation = 0;
 let primaryCameraId = null, secondaryTimer = null, lastSecondaryNs = null;
-let poseViews = {}, cameraCards = {};
+let poseViews = {}, cameraCards = {}, videos = {};
+let nativePlayback = false;
 const seconds = ns => (ns / 1e9).toFixed(2) + ' s';
 const episodeBrowser = new EpisodeBrowser({select: $('episode'),
   previous: $('episode-prev'), next: $('episode-next'), status: $('episode-count')}, id => load(id));
@@ -303,9 +306,100 @@ const curveView = new StateCurves($('curve-canvas'), $('curve-controls'), $('cur
 });
 function setPlaying(value) {
   playing = value;
-  if (playing) playbackOriginMs = performance.now() - currentNs / 1e6;
+  if (playing && nativePlayback) {
+    seekVideos();
+    startVideo(primaryCameraId);
+  } else if (playing) {
+    playbackOriginMs = performance.now() - currentNs / 1e6;
+  } else {
+    for (const video of Object.values(videos)) video.pause();
+  }
   $('play').textContent = playing ? '❚❚ Pause' : '▶ Play';
   $('play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+function mediaTime(camera) {
+  const stream = data.cameras[camera];
+  // Seek inside the frame interval, including when a rounded timestamp falls just below its boundary.
+  return ((stream.first_frame || 0) + sampleIndex(stream.times, currentNs) + 0.25) / 30;
+}
+function seekVideos() {
+  for (const [camera, video] of Object.entries(videos)) {
+    const target = mediaTime(camera);
+    if (Math.abs(video.currentTime - target) > 0.002) video.currentTime = target;
+  }
+}
+function startVideo(camera) {
+  const video = videos[camera];
+  video.play().catch(error => {
+    if (error.name !== 'AbortError' && playing && videos[camera] === video) useFramePlayback();
+  });
+}
+function useFramePlayback() {
+  if (!nativePlayback) return;
+  nativePlayback = false;
+  for (const [camera, video] of Object.entries(videos)) {
+    video.pause();
+    cameraCards[camera].classList.remove('show-video');
+  }
+  playbackOriginMs = performance.now() - currentNs / 1e6;
+  render();
+}
+function showVideoFrame(camera, time) {
+  if (!playing || !nativePlayback || camera !== primaryCameraId || videos[camera].seeking) return;
+  const stream = data.cameras[camera];
+  const index = Math.max(0, Math.round(time * 30) - (stream.first_frame || 0));
+  currentNs = stream.times[Math.min(index, stream.frames - 1)];
+  if (index >= stream.frames - 1) setPlaying(false);
+  render();
+}
+function setupVideo(camera, episode, primary) {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = primary ? 'auto' : 'metadata';
+  video.setAttribute('aria-label', camera + ' video');
+  video.onloadeddata = () => {
+    if (!nativePlayback || data !== episode) return;
+    cameraCards[camera].classList.add('show-video');
+    if (camera === primaryCameraId)
+      for (const follower of Object.values(videos)) follower.preload = 'auto';
+  };
+  video.onplaying = () => {
+    if (!playing || !nativePlayback || data !== episode) return;
+    cameraCards[camera].classList.add('show-video');
+    if (camera === primaryCameraId) {
+      for (const other of Object.keys(videos)) {
+        if (other === camera) continue;
+        videos[other].currentTime = mediaTime(other);
+        startVideo(other);
+      }
+    }
+  };
+  video.onwaiting = () => {
+    if (playing && nativePlayback && camera === primaryCameraId && data === episode)
+      for (const [other, follower] of Object.entries(videos)) if (other !== camera) follower.pause();
+  };
+  video.onended = () => {
+    if (playing && nativePlayback && camera === primaryCameraId && data === episode) {
+      currentNs = data.end_ns;
+      setPlaying(false);
+      render();
+    }
+  };
+  video.onerror = () => { if (data === episode) useFramePlayback(); };
+  if (video.requestVideoFrameCallback) {
+    const presented = (_, frame) => {
+      if (data !== episode) return;
+      const index = Math.round(frame.mediaTime * 30) - (episode.cameras[camera].first_frame || 0);
+      if (nativePlayback && !playing && episode.cameras[camera].times[index] !== undefined)
+        document.getElementById('meta-' + camera).textContent = 'Sampled at ' + seconds(episode.cameras[camera].times[index]);
+      showVideoFrame(camera, frame.mediaTime);
+      video.requestVideoFrameCallback(presented);
+    };
+    video.requestVideoFrameCallback(presented);
+  }
+  if (nativePlayback) video.src = './api/video?' + new URLSearchParams({id: episode.episode_id, camera});
+  return video;
 }
 function frameUrl(id, camera, index, width) {
   return `./api/frame?id=${encodeURIComponent(id)}&camera=${encodeURIComponent(camera)}&index=${index}&width=${width}`;
@@ -323,6 +417,7 @@ function orderedCameras(ids) {
   return [...ids].sort((a, b) => score(b) - score(a) || a.localeCompare(b));
 }
 function setPrimaryCamera(camera) {
+  if (camera === primaryCameraId) return;
   primaryCameraId = camera;
   lastSecondaryNs = null;
   if (secondaryTimer !== null) { clearTimeout(secondaryTimer); secondaryTimer = null; }
@@ -333,11 +428,15 @@ function setPrimaryCamera(camera) {
     card.setAttribute('aria-current', id === camera ? 'true' : 'false');
     (id === camera ? $('primaryCamera') : $('otherCameras')).append(card);
   }
+  if (nativePlayback && playing) {
+    seekVideos();
+    startVideo(camera);
+  }
 }
 function requestCameraFrame(camera, index) {
   const img = document.getElementById('img-' + camera);
   if (!img) return;
-  const width = Math.max(160, Math.min(1600, Math.ceil(img.clientWidth * (window.devicePixelRatio || 1))));
+  const width = Math.max(160, Math.min(1600, Math.ceil(cameraCards[camera].clientWidth * (window.devicePixelRatio || 1))));
   const request = `${index}:${width}`;
   if (index < 0) {
     if (img.dataset.request) img.removeAttribute('src');
@@ -378,7 +477,7 @@ function render() {
   if (!data) return;
   // While playing, compare the states with the frame that has actually loaded.
   const primaryImage = cameraCards[primaryCameraId]?.querySelector('img');
-  const shownNs = playing && primaryImage?.dataset.sampleNs ? Number(primaryImage.dataset.sampleNs) : currentNs;
+  const shownNs = playing && !nativePlayback && primaryImage?.dataset.sampleNs ? Number(primaryImage.dataset.sampleNs) : currentNs;
   const end = Math.max(data.end_ns, 1);
   $('timeline').value = Math.round(shownNs / end * 1000);
   $('time').textContent = seconds(shownNs) + ' / ' + seconds(data.end_ns);
@@ -387,8 +486,18 @@ function render() {
     (shownNs < ins.end_ns || shownNs === data.end_ns && ins.end_ns === data.end_ns));
   const instruction = active ? active.text : 'No instruction for this time range';
   if ($('instruction').textContent !== instruction) $('instruction').textContent = instruction;
-  if (primaryImage) requestCameraFrame(primaryCameraId, sampleIndex(data.cameras[primaryCameraId].times, currentNs));
-  scheduleSecondaryCameras();
+  if (playing && nativePlayback) {
+    document.getElementById('meta-' + primaryCameraId).textContent = 'Sampled at ' + seconds(shownNs);
+    for (const [camera, video] of Object.entries(videos)) {
+      if (camera !== primaryCameraId && !video.paused && !video.seeking &&
+          Math.abs(video.currentTime - mediaTime(camera)) > 0.15) video.currentTime = mediaTime(camera);
+    }
+  } else if (nativePlayback) {
+    seekVideos();
+  } else {
+    if (primaryImage) requestCameraFrame(primaryCameraId, sampleIndex(data.cameras[primaryCameraId].times, currentNs));
+    scheduleSecondaryCameras();
+  }
   const activeStreams = review.activeStreams(shownNs);
   for (const side of ['left', 'right']) {
     const pose = data.streams[side + '_eef'], gripper = data.streams[side + '_gripper'];
@@ -408,6 +517,8 @@ function setup(episode, startNs = 0) {
   Object.values(poseViews).forEach(view => view.destroy());
   if (secondaryTimer !== null) clearTimeout(secondaryTimer);
   poseViews = {}; cameraCards = {}; primaryCameraId = null; secondaryTimer = null; lastSecondaryNs = null;
+  videos = {};
+  nativePlayback = Boolean(document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"'));
   data = episode; currentNs = startNs; setPlaying(false);
   curveView.setEpisode(episode);
   review.setEpisode(episode);
@@ -429,14 +540,15 @@ function setup(episode, startNs = 0) {
     img.onerror = () => {
       if (!img.isConnected || !img.dataset.request) return;
       img.dataset.loading = '';
-      if (camera === primaryCameraId) {
+      if (camera === primaryCameraId && !(nativePlayback && playing)) {
         setPlaying(false);
         $('error').textContent = `Failed to decode the video frame for ${camera}; check PyAV and Pillow.`;
       }
     };
     const title = document.createElement('span'); title.className = 'camera-title'; title.textContent = camera;
     const detail = document.createElement('span'); detail.id = 'meta-' + camera; detail.className = 'detail';
-    card.append(img, title, detail);
+    videos[camera] = setupVideo(camera, episode, camera === cameras[0]);
+    card.append(img, videos[camera], title, detail);
     card.addEventListener('click', () => { setPrimaryCamera(camera); render(); });
     cameraCards[camera] = card;
   }
@@ -462,6 +574,10 @@ async function load(id, startNs = 0) {
   const token = ++generation;
   setPlaying(false);
   data = null;
+  for (const video of Object.values(videos)) {
+    video.removeAttribute('src');
+    video.load();
+  }
   $('play').disabled = true; $('timeline').disabled = true;
   $('error').textContent = '';
   $('instruction').textContent = 'Loading…';
@@ -481,7 +597,11 @@ async function load(id, startNs = 0) {
   }
 }
 function tick(now) {
-  if (playing && data) {
+  if (playing && nativePlayback) {
+    const video = videos[primaryCameraId];
+    if (!video.requestVideoFrameCallback && !video.paused)
+      showVideoFrame(primaryCameraId, Math.floor(video.currentTime * 30) / 30);
+  } else if (playing && data) {
     currentNs = Math.min(data.end_ns, Math.max(0, (now - playbackOriginMs) * 1e6));
     if (currentNs >= data.end_ns) setPlaying(false);
     render();
@@ -491,12 +611,13 @@ function tick(now) {
 $('timeline').addEventListener('input', () => {
   if (!data) return;
   currentNs = Number($('timeline').value) / 1000 * data.end_ns;
-  if (playing) playbackOriginMs = performance.now() - currentNs / 1e6;
+  if (playing && nativePlayback) seekVideos();
+  else if (playing) playbackOriginMs = performance.now() - currentNs / 1e6;
   render();
 });
 $('play').addEventListener('click', () => {
   if (!data) return;
-  if (currentNs >= data.end_ns) currentNs = 0;
+  if (!playing && currentNs >= data.end_ns) currentNs = 0;
   setPlaying(!playing);
   render();
 });

@@ -317,6 +317,38 @@ class ExportViewerTests(unittest.TestCase):
         self.assertEqual(size, tuple(dataset.info['features']['observation.images.top']['shape'][1::-1]))
         self.assertEqual(Image.open(BytesIO(results[0][1])).size[0], 64)
 
+    def test_video_range_requests_serve_original_mp4_bytes(self):
+        dataset = contract.Dataset(self.root)
+        video, _ = dataset.video(dataset.episodes[0], 'top')
+        content = video.read_bytes()
+        size = len(content)
+        with patch('loom_data.viewer.server.ThreadingHTTPServer') as server:
+            serve(self.root, '127.0.0.1', 8765)
+        handler_class = server.call_args.args[1]
+        cases = [
+            (None, 200, None, content),
+            ('bytes=0-15', 206, f'bytes 0-15/{size}', content[:16]),
+            ('bytes=-8', 206, f'bytes {size - 8}-{size - 1}/{size}', content[-8:]),
+            (f'bytes={size - 8}-', 206, f'bytes {size - 8}-{size - 1}/{size}', content[-8:]),
+            (f'bytes={size}-', 416, f'bytes */{size}', b''),
+            ('bytes=4-1', 416, f'bytes */{size}', b''),
+        ]
+        for header, status, span, body in cases:
+            with self.subTest(header=header):
+                handler = handler_class.__new__(handler_class)
+                handler.path = '/api/video?id=sample&camera=top'
+                handler.headers = {} if header is None else {'Range': header}
+                headers = {}
+                handler.send_header = headers.__setitem__
+                handler.send_response = Mock()
+                handler.end_headers = Mock()
+                handler.wfile = BytesIO()
+                handler.do_GET()
+                handler.send_response.assert_called_once_with(status)
+                self.assertEqual(headers.get('Content-Range'), span)
+                self.assertEqual(int(headers['Content-Length']), len(body))
+                self.assertEqual(handler.wfile.getvalue(), body)
+
     def test_frame_requests_map_to_the_episode_video_file_and_frame(self):
         dataset = self.rebuild(still('first', 'second'))
         files = [dataset.video(episode, 'top') for episode in dataset.episodes]

@@ -6,6 +6,7 @@ from io import BytesIO
 import json
 from fractions import Fraction
 import os
+import re
 from pathlib import Path
 from threading import Lock
 from urllib.parse import parse_qs, urlsplit
@@ -92,9 +93,12 @@ def read_episode(dataset, episode):
         streams[name] = {'times': times, 'values': (values if is_pose(name) else values[:, 0]).tolist()}
     cameras = {}
     for camera in dataset.cameras:
-        if not dataset.video(episode, camera)[0].is_file():
+        path, first = dataset.video(episode, camera)
+        if not path.is_file():
             raise ValueError(f'Missing camera video: {camera}')
         cameras[camera] = {'times': times, 'frames': len(times)}
+        if first:
+            cameras[camera]['first_frame'] = first
     return {'episode_id': episode['episode_id'], 'instructions': instruction_intervals(texts),
             'streams': streams, 'cameras': cameras, 'end_ns': times[-1]}
 
@@ -229,6 +233,52 @@ def serve(root, host, port, anomalies_path=None):
                 # The browser may cancel an image request while scrubbing.
                 pass
 
+        def send_video(self, path):
+            with path.open('rb') as source:
+                stat = os.fstat(source.fileno())
+                size = stat.st_size
+                start, end = 0, size - 1
+                requested = self.headers.get('Range')
+                if requested is not None:
+                    match = re.fullmatch(r'bytes=(\d*)-(\d*)', requested.strip())
+                    if match and any(match.groups()):
+                        left, right = match.groups()
+                        if left:
+                            start = int(left)
+                            if right:
+                                end = min(int(right), end)
+                        else:
+                            start = max(0, size - int(right))
+                    else:
+                        start = size
+                    if start > end:
+                        self.send_response(416)
+                        self.send_header('Content-Range', f'bytes */{size}')
+                        self.send_header('Content-Length', '0')
+                        self.end_headers()
+                        return
+                self.send_response(206 if requested else 200)
+                self.send_header('Content-Type', 'video/mp4')
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Cache-Control', 'private, no-cache')
+                self.send_header('ETag', f'"{stat.st_mtime_ns:x}-{size:x}"')
+                if requested:
+                    self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+                remaining = end - start + 1
+                self.send_header('Content-Length', str(remaining))
+                try:
+                    self.end_headers()
+                    source.seek(start)
+                    while remaining:
+                        block = source.read(min(256 * 1024, remaining))
+                        if not block:
+                            self.close_connection = True
+                            break
+                        self.wfile.write(block)
+                        remaining -= len(block)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass  # Browsers cancel ranges when switching episodes or seeking.
+
         def do_GET(self):
             parsed = urlsplit(self.path)
             query = parse_qs(parsed.query)
@@ -247,19 +297,22 @@ def serve(root, host, port, anomalies_path=None):
                     if any(record['end_ns'] > payload['end_ns'] for record in (anomalies or [])
                            if record['episode_id'] == episode_id):
                         raise ValueError(f'Anomaly interval exceeds episode duration: {episode_id}')
-                elif parsed.path == '/api/frame':
+                elif parsed.path in ('/api/frame', '/api/video'):
                     episode_id = query['id'][0]
                     camera = query['camera'][0]
                     episode = episode_index.record(episode_id)
                     if camera not in dataset.cameras:
                         raise KeyError(camera)
+                    path, first = dataset.video(episode, camera)
+                    if parsed.path == '/api/video':
+                        self.send_video(path)
+                        return
                     index = int(query['index'][0])
                     if not 0 <= index < episode['length']:
                         raise ValueError('Frame index outside the episode')
                     width = int(query.get('width', ['1280'])[0])
                     if not 64 <= width <= 2048:
                         raise ValueError('Invalid frame width')
-                    path, first = dataset.video(episode, camera)
                     index += first
                     with readers_lock:
                         reader = readers.get(path)
@@ -296,5 +349,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         serve(args.dataset.resolve(), args.host, args.port, args.anomalies)
+    except KeyboardInterrupt:
+        parser.exit(130, 'Viewer stopped.\n')
     except (OSError, ValueError, KeyError) as exc:
         parser.exit(1, f'Error: {exc}\n')
