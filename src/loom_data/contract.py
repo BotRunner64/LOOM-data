@@ -48,7 +48,7 @@ STATE = pa.list_(pa.float32(), STATE_DIM)
 # One export resolution per aspect ratio (section 5): width 640 where that gives a whole,
 # even height; a ratio that does not scale to one keeps its native resolution.
 RESOLUTIONS = {(4, 3): (640, 480), (16, 9): (640, 360), (8, 5): (640, 400), (16, 13): (640, 520),
-               (53, 30): (848, 480)}
+               (5, 4): (640, 512), (40, 33): (640, 528), (53, 30): (848, 480)}
 
 FRAMES = 'frames.parquet'
 FRAME_SCHEMA = pa.schema([pa.field(STATE_KEY, STATE, nullable=False),

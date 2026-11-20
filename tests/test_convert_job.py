@@ -60,11 +60,13 @@ class CameraContractTests(unittest.TestCase):
                          [(640, 480), (640, 400), (640, 360), (640, 520), (640, 480)])
         # 53:30 has no whole height at width 640, so it keeps its native resolution.
         self.assertEqual(contract.export_size(848, 480), (848, 480))
+        self.assertEqual(contract.export_size(1280, 1024), (640, 512))
+        self.assertEqual(contract.export_size(640, 528), (640, 528))
         self.assertEqual(contract.layout_name(cameras := ['left_wrist', 'right_wrist', 'top'], {c: [848, 480] for c in cameras}),
                          'top+left_wrist+right_wrist_848x480')
         for ratio, (width, height) in contract.RESOLUTIONS.items():
             self.assertEqual((width * ratio[1], height % 2), (height * ratio[0], 0))
-        for size in ((32, 32), (640, 0), (1280, 1024)):
+        for size in ((32, 32), (640, 0), (1280, 1000)):
             with self.subTest(size=size), self.assertRaises(ValueError):
                 contract.export_size(*size)
         cameras = ['left_wrist', 'right_wrist', 'top']
