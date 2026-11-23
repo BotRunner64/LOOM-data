@@ -89,10 +89,10 @@ class ExportViewerTests(unittest.TestCase):
     def test_anomalies_resolve_episode_indices_and_preserve_unknown_reasons(self):
         self.rebuild(still('sample', 'other'))
         records = [
-            {'index': 1, 'stream': 'left_eef', 'start_ns': 10, 'end_ns': 20,
-             'reason': 'arbitrary_future_rule'},
-            {'index': 0, 'stream': 'right_gripper', 'start_ns': 30, 'end_ns': 30,
-             'reason': '<uninterpreted reason>'},
+            {'episode_index': 1, 'reason': 'arbitrary_future_rule', 'stream': 'left_eef',
+             'start_frame': 10, 'end_frame': 20},
+            {'episode_index': 0, 'reason': '<uninterpreted reason>', 'stream': None,
+             'start_frame': 30, 'end_frame': 31},
         ]
         path = self.report(records + records[:1])
         result = read_anomalies(self.root, path)
@@ -100,20 +100,23 @@ class ExportViewerTests(unittest.TestCase):
                                   dict(records[1], episode_id='sample'),
                                   dict(records[0], episode_id='other')])
         # Blank report lines are skipped but still counted when locating an error.
-        path.write_text('\n' + json.dumps(records[1]) + '\n\n' + json.dumps({**records[0], 'index': 2}) + '\n')
-        with self.assertRaisesRegex(ValueError, 'anomalies.jsonl:4: index does not address an episode'):
+        path.write_text('\n' + json.dumps(records[1]) + '\n\n' + json.dumps({**records[0], 'episode_index': 2}) + '\n')
+        with self.assertRaisesRegex(ValueError, 'anomalies.jsonl:4: episode_index does not address an episode'):
             read_anomalies(self.root, path)
 
     def test_invalid_anomaly_records_report_source_line(self):
-        valid = {'index': 0, 'stream': 'left_eef', 'start_ns': 10, 'end_ns': 20,
-                 'reason': 'custom'}
-        for change in ({'index': True}, {'index': 1}, {'index': -1}, {'stream': 'camera'},
-                       {'start_ns': -1}, {'end_ns': 9}, {'end_ns': 20.0},
+        valid = {'episode_index': 0, 'reason': 'custom', 'stream': 'left_eef', 'start_frame': 10,
+                 'end_frame': 20}
+        for change in ({'episode_index': True}, {'episode_index': 1}, {'episode_index': -1}, {'stream': 'camera'},
+                       {'start_frame': -1}, {'end_frame': 9}, {'end_frame': 10}, {'end_frame': 20.0},
                        {'reason': ''}, {'reason': None}):
             with self.subTest(change=change):
                 path = self.report([valid, {**valid, **change}])
                 with self.assertRaisesRegex(ValueError, 'anomalies.jsonl:2:'):
                     read_anomalies(self.root, path)
+        path = self.report([valid, {key: value for key, value in valid.items() if key != 'stream'}])
+        with self.assertRaisesRegex(ValueError, 'anomalies.jsonl:2: Invalid stream'):
+            read_anomalies(self.root, path)
         for malformed in ('[]', '{', '{}'):
             path.write_text(malformed)
             with self.assertRaisesRegex(ValueError, 'anomalies.jsonl:1:'):
@@ -125,8 +128,8 @@ class ExportViewerTests(unittest.TestCase):
         self.assertIsNone(json.loads(body)['anomalies'])
         self.report([])
         self.assertEqual(json.loads(self.request('/api/dataset')[1])['anomalies'], [])
-        record = {'index': 0, 'stream': 'left_eef', 'start_ns': 30, 'end_ns': 30,
-                  'reason': 'another_rule'}
+        record = {'episode_index': 0, 'reason': 'another_rule', 'stream': 'left_eef', 'start_frame': 1,
+                  'end_frame': 2}
         report = self.report([record]).rename(self.root / 'custom.jsonl')
         payload = json.loads(self.request('/api/dataset', report)[1])
         self.assertEqual(payload['anomalies'], [dict(record, episode_id='sample')])
@@ -189,16 +192,16 @@ class ExportViewerTests(unittest.TestCase):
                 self.assertEqual(status, 400)
         self.assertEqual(self.request('/api/episodes?limit=200')[0], 200)
 
-    def test_rejects_report_beyond_episode_duration_when_loading_episode(self):
-        # The episode ends at its last frame time.
-        record = {'index': 0, 'stream': 'left_eef', 'start_ns': 30, 'end_ns': TIMES[-1],
-                  'reason': 'custom'}
+    def test_rejects_report_beyond_episode_length_when_loading_episode(self):
+        # A record may end one past the last frame, but no further.
+        record = {'episode_index': 0, 'reason': 'custom', 'stream': None, 'start_frame': 1,
+                  'end_frame': len(TIMES)}
         self.report([record])
         self.assertEqual(self.request('/api/episode?id=sample')[0], 200)
-        self.report([{**record, 'end_ns': TIMES[-1] + 1}])
+        self.report([{**record, 'end_frame': len(TIMES) + 1}])
         status, body, _ = self.request('/api/episode?id=sample')
         self.assertEqual(status, 400)
-        self.assertIn(b'exceeds episode duration', body)
+        self.assertIn(b'exceeds episode length', body)
 
     def test_episode_payload_is_derived_from_the_frame_table(self):
         index = EpisodeIndex(self.root)

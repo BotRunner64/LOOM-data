@@ -63,20 +63,20 @@ def read_anomalies(root, path, episode_id_at=None):
                 record = json.loads(line)
                 if not isinstance(record, dict):
                     raise ValueError('Expected an anomaly object')
-                for field in ('index', 'start_ns', 'end_ns'):
+                for field in ('episode_index', 'start_frame', 'end_frame'):
                     if type(record.get(field)) is not int or record[field] < 0:
                         raise ValueError(f'{field} must be a nonnegative integer')
-                episode_id = episode_id_at(record['index'])
+                episode_id = episode_id_at(record['episode_index'])
                 if episode_id is None:
-                    raise ValueError('index does not address an episode of the dataset')
-                if record.get('stream') not in STATE_NAMES:
+                    raise ValueError('episode_index does not address an episode of the dataset')
+                if 'stream' not in record or record['stream'] not in (None, *STATE_NAMES):
                     raise ValueError('Invalid stream')
-                if record['end_ns'] < record['start_ns']:
-                    raise ValueError('end_ns must be >= start_ns')
+                if record['end_frame'] <= record['start_frame']:
+                    raise ValueError('end_frame must be > start_frame')
                 if not isinstance(record.get('reason'), str) or not record['reason'].strip():
                     raise ValueError('reason must be a nonempty string')
                 records.append({key: record[key] for key in
-                                ('index', 'stream', 'start_ns', 'end_ns', 'reason')})
+                                ('episode_index', 'reason', 'stream', 'start_frame', 'end_frame')})
                 records[-1]['episode_id'] = episode_id
             except ValueError as exc:
                 raise ValueError(f'{path}:{line_number}: {exc}') from exc
@@ -294,9 +294,10 @@ def serve(root, host, port, anomalies_path=None):
                 elif parsed.path == '/api/episode':
                     episode_id = query['id'][0]
                     payload = read_episode(dataset, episode_index.record(episode_id))
-                    if any(record['end_ns'] > payload['end_ns'] for record in (anomalies or [])
+                    frames = len(payload['streams'][STATE_NAMES[0]]['times'])
+                    if any(record['end_frame'] > frames for record in (anomalies or [])
                            if record['episode_id'] == episode_id):
-                        raise ValueError(f'Anomaly interval exceeds episode duration: {episode_id}')
+                        raise ValueError(f'Anomaly interval exceeds episode length: {episode_id}')
                 elif parsed.path in ('/api/frame', '/api/video'):
                     episode_id = query['id'][0]
                     camera = query['camera'][0]

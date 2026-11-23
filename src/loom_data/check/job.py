@@ -25,13 +25,16 @@ from itertools import islice
 from pathlib import Path
 
 from loom_data import contract
-from loom_data.contract import STATE_NAMES
+from loom_data.contract import STATE_NAMES, is_pose
 from loom_data import resumable
 from loom_data.resumable import (
     StateError, atomic_json, atomic_text, check_inputs, configure_worker, digest, encoded, input_stamp,
     progress, read_json, require_single_process, run_cli, run_workers, sync_directory, worker_diagnostics,
     worker_rank,
 )
+
+
+EEF_NAMES = tuple(name for name in STATE_NAMES if is_pose(name))
 
 
 def file_digest(path):
@@ -194,14 +197,16 @@ class Store:
                 or value.get('checksum') != digest({k: v for k, v in value.items() if k != 'checksum'})
                 or not isinstance(value.get('results'), list)):
             raise StateError(f'Damaged result: {path}')
+        from loom_data.check import anomalies as detector
         for row in value['results']:
             if (not isinstance(row, dict)
-                    or set(row) != {'index', 'stream', 'start_ns', 'end_ns', 'reason'}
-                    or row['index'] != task['index']
-                    or row['stream'] not in STATE_NAMES
-                    or row['reason'] not in ('boundary_idle', 'state_jump', 'internal_idle')
-                    or type(row['start_ns']) is not int or type(row['end_ns']) is not int
-                    or not 0 <= row['start_ns'] <= row['end_ns']):
+                    or set(row) != set(detector.FIELDS)
+                    or row['episode_index'] != task['index']
+                    or row['reason'] not in detector.REASONS
+                    # Idling concerns the whole episode; a spike belongs to one arm.
+                    or row['stream'] not in (EEF_NAMES if row['reason'] == 'eef_spike' else (None,))
+                    or type(row['start_frame']) is not int or type(row['end_frame']) is not int
+                    or not 0 <= row['start_frame'] < row['end_frame']):
                 raise StateError(f'Invalid anomaly record: {path}')
         return value['results']
 
@@ -362,8 +367,7 @@ def worker(root, output=None, worker_id=0, worker_count=1, *, report=None):
                 episode = dataset.episodes[index]
                 if episode['episode_id'] != task['record']['episode_id']:
                     raise ValueError('Dataset episodes changed since prepare')
-                streams, end_ns = detector.read_episode(dataset, episode)
-                results = detector.detect_episode(index, streams, end_ns, config)
+                results = detector.detect_episode(index, detector.read_episode(dataset, episode), config)
                 check_inputs(task['inputs'])
             except Exception:  # noqa: BLE001 - record episode failures and continue assigned work
                 failures += 1
@@ -402,7 +406,7 @@ def finalize(root, output=None):
             for task in store.plan['tasks']:
                 for row in store.result(task):
                     # Recovery JSON sorts keys; restore the serial report's field order.
-                    ordered = {key: row[key] for key in ('index', 'stream', 'start_ns', 'end_ns', 'reason')}
+                    ordered = {key: row[key] for key in detector.FIELDS}
                     handle.write(json.dumps(ordered, separators=(',', ':')) + '\n')
                     anomalies += 1
             handle.flush()

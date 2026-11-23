@@ -26,7 +26,7 @@ src/loom_data/
 - `convert/job.py` 只负责计划、续跑和发布，不包含任何数据源的知识。
 - `check/` 和 `viewer/` 只读导出数据，不依赖 `sources/`。
 
-[导出契约](contract/export-contract.md)是项目的核心，格式的任何调整都先改那份文档，再改 `contract.py`。
+[导出契约](contract/export-contract.md)是项目的核心，格式的任何调整都先改那份文档，再改 `contract.py`。异常检测同理：规则、阈值或报告格式的调整先改[异常检测契约](contract/anomaly-contract.md)，再改 `check/anomalies.py`。
 
 ## 可续跑作业
 

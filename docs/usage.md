@@ -156,7 +156,7 @@ published.json             发布标记：各布局的 episode 数和帧数
 loom-data check run dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480 --workers 8
 ```
 
-检测的对象是一个布局数据集。报告默认写到 `<数据集>/anomalies.jsonl`，用 `--output` 修改。规则、阈值和报告格式见[异常报告](anomaly-report.md)；阈值都可以用命令行参数覆盖，见 `loom-data check run --help`。
+检测的对象是一个布局数据集。报告默认写到 `<数据集>/anomalies.jsonl`，用 `--output` 修改。规则、阈值和报告格式见[异常检测契约](contract/anomaly-contract.md)；阈值都可以用命令行参数覆盖，见 `loom-data check run --help`。
 
 检测只读逐帧表里的 state，不解码视频。流程和转换一样：中断后重跑即可续跑；Slurm 上分三步执行：
 
@@ -169,6 +169,8 @@ loom-data check finalize dataset/export/ABC-130K/top+left_wrist+right_wrist_640x
 与转换不同的是，检测的 `finalize` 要求每个 episode 都成功，不会省略失败的。全部成功后才替换报告，失败时保留旧报告。
 
 阈值固定在计划里。换阈值时用新的 `--output` 路径生成另一份报告。续跑状态在 `<报告路径>.anomaly-work`（导出目录下的报告对应 `dataset/work/` 里的同名路径）。
+
+检测规则更新后，旧的续跑状态和旧报告都不能沿用：工具会拒绝用旧计划续跑，viewer 和 `anomaly-stats` 也读不了旧格式的报告。删掉对应的 `.anomaly-work` 目录后重新检测，或用新的 `--output` 路径。
 
 ## 统计
 
@@ -197,7 +199,7 @@ viewer 只读导出目录，不依赖源数据、转换代码或机器人模型�
 - 浏览器优先预加载主相机 MP4，主画面开始后同步播放其他视角。曲线游标和位姿跟随主相机显示的帧。暂停后可在已缓冲的视频中按帧定位。浏览器无法播放 H.264 时会自动切换为逐帧图像。拖动时间轴可以定位到指定时刻。
 - 所有数据在同一条 30 fps 帧序列上，显示当前时刻所在的帧。焦点在相机画面或曲线上时，左右方向键按帧单步。
 - 3D 视图里红、绿、蓝轴是工具的 X、Y、Z，白球是 EEF 原点（夹爪安装接口）。左右臂各在自己的参考系里显示，不做跨臂拼接；几何体尺寸只是示意。
-- 导出目录下有 `anomalies.jsonl` 时自动加载，也可以用 `--anomalies` 指定报告。异常可以按 episode、数据流、原因筛选，点击后跳到对应时刻。报告在启动时读取，更新后要重启 viewer。
+- 导出目录下有 `anomalies.jsonl` 时自动加载，也可以用 `--anomalies` 指定报告。异常可以按 episode、数据流、原因筛选，点击后跳到对应时刻。静止类异常针对整个 episode，显示在时间轴的 `episode` 一行；尖峰显示在对应的臂上。报告在启动时读取，更新后要重启 viewer。
 
 ## 机器人模型
 

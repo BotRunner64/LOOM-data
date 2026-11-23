@@ -27,7 +27,7 @@ class ParallelDetectionTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(temp.cleanup)
         cls.template = Path(temp.name).resolve() / 'dataset'
-        # Episodes 0, 1, 3 and 4 are still for exactly 5 s (two boundary records each).
+        # Episodes 0, 1, 3 and 4 are still for just over 5 s (one boundary record each).
         # Episode 2 is too short for any anomaly, which must still count as committed work.
         make_dataset(cls.template, {f'episode-{i}': {'left_gripper': np.zeros(3 if i == 2 else 151)}
                                     for i in range(5)})
@@ -56,7 +56,7 @@ class ParallelDetectionTests(unittest.TestCase):
 
     def test_local_cli_matches_the_rules_and_repeat_skips_all_results(self):
         expected = expected_report(self.root)
-        self.assertEqual(len(expected.splitlines()), 8)
+        self.assertEqual(len(expected.splitlines()), 4)
         result = self.cli('run', '--workers', '3')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.output.read_text(), expected)
@@ -95,9 +95,9 @@ class ParallelDetectionTests(unittest.TestCase):
                 self.assertEqual(parallel.worker(self.root, worker_id=rank, worker_count=2), 0)
         self.assertCountEqual(called, ['episode-1', 'episode-2', 'episode-4'])
         self.assertEqual(committed, {p: p.read_bytes() for p in committed})
-        self.assertEqual(parallel.finalize(self.root), (5, 8))
-        self.assertEqual([json.loads(line)['index'] for line in self.output.read_text().splitlines()],
-                         [0, 0, 1, 1, 3, 3, 4, 4])
+        self.assertEqual(parallel.finalize(self.root), (5, 4))
+        self.assertEqual([json.loads(line)['episode_index'] for line in self.output.read_text().splitlines()],
+                         [0, 1, 3, 4])
         self.assertEqual(self.output.read_text(), expected_report(self.root))
 
     def test_plan_is_a_single_sqlite_database(self):
@@ -178,7 +178,7 @@ class ParallelDetectionTests(unittest.TestCase):
         store = parallel.prepare(self.root)
         self.assertEqual(store.audit(), (0, 0, 5))
         self.assertEqual(parallel.worker(self.root), 0)
-        self.assertEqual(parallel.finalize(self.root), (5, 8))
+        self.assertEqual(parallel.finalize(self.root), (5, 4))
 
     def test_plan_publish_interruption_keeps_a_usable_database(self):
         with patch.object(parallel, 'sync_directory', side_effect=KeyboardInterrupt), \
@@ -211,7 +211,7 @@ class ParallelDetectionTests(unittest.TestCase):
         parallel.prepare(self.root)
         self.assertEqual(parallel.worker(self.root), 0)
         self.assertFalse(error.exists())
-        self.assertEqual(parallel.finalize(self.root), (5, 8))
+        self.assertEqual(parallel.finalize(self.root), (5, 4))
 
     def test_audit_checks_unfinished_inputs_concurrently(self):
         store = parallel.prepare(self.root)
@@ -274,7 +274,7 @@ class ParallelDetectionTests(unittest.TestCase):
             parallel.finalize(self.root)
         report = self.output.read_bytes()
         self.assertFalse((store.work / 'published.json').exists())
-        self.assertEqual(parallel.finalize(self.root), (5, 8))
+        self.assertEqual(parallel.finalize(self.root), (5, 4))
         self.assertEqual(self.output.read_bytes(), report)
 
     def test_rejects_changed_thresholds_inputs_and_detector(self):
@@ -391,7 +391,7 @@ class ParallelDetectionTests(unittest.TestCase):
             parallel.finalize(self.root)
         self.metadata.write_bytes(saved[0])
         self.assertEqual(parallel.worker(self.root), 0)
-        self.assertEqual(parallel.finalize(self.root), (5, 8))
+        self.assertEqual(parallel.finalize(self.root), (5, 4))
 
     def test_protects_input_paths_and_rejects_invalid_duplicate_or_empty_datasets(self):
         for output in (self.info, self.root / 'meta/report.jsonl', self.data.with_name('report.jsonl'),

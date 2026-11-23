@@ -36,13 +36,11 @@ class AnomalyStatsTests(unittest.TestCase):
         self.root = self.parent / 'example'
         shutil.copytree(self.template / 'example', self.root)
         # Records address episodes by episode_index: 0 is "one", 1 is "two".
-        self.records = [dict(index=0, stream=stream, start_ns=2_000_000_000,
-                             end_ns=15_000_000_000, reason='internal_idle')
-                        for stream in ('left_eef', 'right_eef', 'left_gripper', 'right_gripper')]
-        self.records += [dict(index=1, stream='left_eef', start_ns=0,
-                              end_ns=4_000_000_000, reason='boundary_idle'),
-                         dict(index=1, stream='left_eef', start_ns=6_000_000_001,
-                              end_ns=6_030_000_001, reason='state_jump')]
+        self.records = [dict(episode_index=0, reason='internal_idle', stream=None, start_frame=start,
+                             end_frame=start + 400) for start in (60, 500, 1000, 1500)]
+        self.records += [dict(episode_index=1, reason='boundary_idle', stream=None, start_frame=0, end_frame=120),
+                         dict(episode_index=1, reason='eef_spike', stream='left_eef', start_frame=180,
+                              end_frame=182)]
         self.write_report()
 
     def write_report(self):
@@ -63,7 +61,7 @@ class AnomalyStatsTests(unittest.TestCase):
             main([*map(str, args), '--json'])
         return json.loads(output.getvalue())
 
-    def test_episode_indices_and_deduplication_across_streams_and_reasons(self):
+    def test_episode_indices_and_deduplication_across_records_and_reasons(self):
         self.assertEqual(read_episode_ids(self.root), {0: 'one', 1: 'two'})
         summary = summarize_dataset(self.root)
         self.assertEqual(summary['dataset'], 'example')
@@ -75,7 +73,7 @@ class AnomalyStatsTests(unittest.TestCase):
         self.assertEqual(summary['by_reason']['internal_idle']['affected_episode_count'], 1)
         self.assertEqual(summary['by_reason']['internal_idle']['affected_episode_rate'], .5)
         self.assertEqual(summary['by_reason']['boundary_idle']['affected_episode_count'], 1)
-        self.assertEqual(summary['by_reason']['state_jump']['affected_episode_count'], 1)
+        self.assertEqual(summary['by_reason']['eef_spike']['affected_episode_count'], 1)
 
     def test_layout_dataset_is_named_after_its_source(self):
         root = self.parent / 'Source-A' / LAYOUT
@@ -126,7 +124,8 @@ class AnomalyStatsTests(unittest.TestCase):
         self.assertEqual(report['total']['by_reason']['internal_idle']['affected_episode_count'], 2)
         # Indices are per dataset: episode 1 exists in "example" but not in the one-episode dataset.
         (missing / 'anomalies.jsonl').write_text(json.dumps(self.records[-1]))
-        with self.assertRaisesRegex(ValueError, 'missing/anomalies.jsonl:1: index does not address an episode'):
+        with self.assertRaisesRegex(ValueError,
+                                    'missing/anomalies.jsonl:1: episode_index does not address an episode'):
             summarize_dataset(missing)
 
     def test_custom_report_through_the_cli(self):
@@ -139,7 +138,7 @@ class AnomalyStatsTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report['datasets'][0]['report_path'], str(custom))
         self.assertEqual(report['total']['record_count'], 1)
-        self.assertEqual(report['total']['by_reason']['state_jump']['affected_episode_count'], 1)
+        self.assertEqual(report['total']['by_reason']['eef_spike']['affected_episode_count'], 1)
         self.add_missing()
         result = subprocess.run(
             [sys.executable, '-m', 'loom_data', 'anomaly-stats', str(self.parent), '--anomalies', str(custom)],
@@ -148,17 +147,17 @@ class AnomalyStatsTests(unittest.TestCase):
         self.assertIn('--anomalies requires a single dataset', result.stderr)
 
     def test_invalid_reports_identify_line(self):
-        for change in ({'index': True}, {'index': 2}, {'index': -1}, {'index': 'one'}, {'start_ns': -1},
-                       {'end_ns': False}, {'end_ns': 1}, {'stream': []}, {'stream': 'top'},
-                       {'reason': ''}, {'reason': None}):
+        for change in ({'episode_index': True}, {'episode_index': 2}, {'episode_index': -1},
+                       {'episode_index': 'one'}, {'start_frame': -1}, {'end_frame': False}, {'end_frame': 1},
+                       {'end_frame': 60}, {'stream': []}, {'stream': 'top'}, {'reason': ''}, {'reason': None}):
             with self.subTest(change=change):
                 self.records = [self.records[0] | change]
                 self.write_report()
                 with self.assertRaisesRegex(ValueError, 'anomalies.jsonl:2:'):
                     summarize_dataset(self.root)
                 # Restore a valid record for the next case.
-                self.records = [dict(index=1, stream='left_eef', start_ns=2_000_000_000,
-                                     end_ns=15_000_000_000, reason='internal_idle')]
+                self.records = [dict(episode_index=1, reason='internal_idle', stream=None, start_frame=60,
+                                     end_frame=460)]
         self.write_report()
         self.assertEqual(summarize_dataset(self.root)['record_count'], 1)
 

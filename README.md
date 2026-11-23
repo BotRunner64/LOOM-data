@@ -46,6 +46,6 @@ loom-data view dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480   #
 ## 文档
 
 - [导出契约](docs/contract/export-contract.md)：导出数据包含什么、如何表示、如何存储。
+- [异常检测契约](docs/contract/anomaly-contract.md)：异常检测的规则、阈值和报告格式。
 - [使用说明](docs/usage.md)：所有命令的用法。
-- [异常报告](docs/anomaly-report.md)：异常检测的规则、阈值和报告格式。
 - [开发说明](docs/development.md)：代码结构，以及如何新增数据源。

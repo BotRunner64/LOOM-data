@@ -9,7 +9,7 @@ from loom_data.paths import EXPORT
 from loom_data.check.dataset_stats import dataset_name
 
 from loom_data.contract import STATE_NAMES, Dataset, discover_datasets
-REASONS = ('boundary_idle', 'internal_idle', 'state_jump')
+REASONS = ('boundary_idle', 'internal_idle', 'eef_spike')
 
 
 def read_episode_ids(root):
@@ -27,19 +27,19 @@ def iter_anomalies(path, episodes):
                 record = json.loads(line)
                 if not isinstance(record, dict):
                     raise ValueError('expected an anomaly object')
-                for field in ('index', 'start_ns', 'end_ns'):
+                for field in ('episode_index', 'start_frame', 'end_frame'):
                     if type(record.get(field)) is not int or record[field] < 0:
                         raise ValueError(f'{field} must be a nonnegative integer')
-                if record['index'] not in episodes:
-                    raise ValueError('index does not address an episode of the dataset')
-                if record.get('stream') not in STATE_NAMES:
+                if record['episode_index'] not in episodes:
+                    raise ValueError('episode_index does not address an episode of the dataset')
+                if 'stream' not in record or record['stream'] not in (None, *STATE_NAMES):
                     raise ValueError('invalid stream')
-                if record['end_ns'] < record['start_ns']:
-                    raise ValueError('end_ns must be >= start_ns')
+                if record['end_frame'] <= record['start_frame']:
+                    raise ValueError('end_frame must be > start_frame')
                 if not isinstance(record.get('reason'), str) or not record['reason'].strip():
                     raise ValueError('reason must be a nonempty string')
                 yield {key: record[key] for key in
-                       ('index', 'stream', 'start_ns', 'end_ns', 'reason')}
+                       ('episode_index', 'reason', 'stream', 'start_frame', 'end_frame')}
             except ValueError as exc:
                 raise ValueError(f'{path}:{line_number}: {exc}') from exc
 
@@ -68,10 +68,10 @@ def summarize_dataset(root, report_path=None):
     record_count = 0
     for record in iter_anomalies(path, episodes):
         record_count += 1
-        affected.add(record['index'])
+        affected.add(record['episode_index'])
         group = groups.setdefault(record['reason'], {'records': 0, 'episodes': set()})
         group['records'] += 1
-        group['episodes'].add(record['index'])
+        group['episodes'].add(record['episode_index'])
     summary.update(counts(record_count, len(affected), len(episodes)))
     summary['by_reason'] = {
         name: counts(group['records'], len(group['episodes']), len(episodes))

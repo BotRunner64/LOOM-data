@@ -140,7 +140,6 @@
   .anomaly-mark { position: absolute; top: 2px; height: 12px; min-height: 0; min-width: 4px;
     padding: 0; border: 1px solid var(--error); border-radius: 3px; background: var(--error); opacity: .25; cursor: pointer; }
   .anomaly-mark:hover { opacity: .65; }
-  .anomaly-mark.point { transform: translateX(-50%); }
   .anomaly-mark[aria-pressed="true"] { opacity: 1; outline: 2px solid var(--text); z-index: 1; }
   .anomalous { color: var(--error); font-weight: 700; }
   @media (min-width: 700px) {
@@ -294,11 +293,11 @@ let nativePlayback = false;
 const seconds = ns => (ns / 1e9).toFixed(2) + ' s';
 const episodeBrowser = new EpisodeBrowser({select: $('episode'),
   previous: $('episode-prev'), next: $('episode-next'), status: $('episode-count')}, id => load(id));
-const review = new AnomalyReview($('anomaly-review'), $('anomaly-marks'), record => {
+const review = new AnomalyReview($('anomaly-review'), $('anomaly-marks'), (record, startNs) => {
   setPlaying(false);
   episodeBrowser.setSelected(record.episode_id);
-  if (data?.episode_id === record.episode_id) { currentNs = record.start_ns; render(); }
-  else load(record.episode_id, record.start_ns);
+  if (data?.episode_id === record.episode_id) { currentNs = startNs; render(); }
+  else load(record.episode_id, startNs);
 });
 const curveView = new StateCurves($('curve-canvas'), $('curve-controls'), $('curve-time'), $('curve-marker'), value => {
   if (!data) return;

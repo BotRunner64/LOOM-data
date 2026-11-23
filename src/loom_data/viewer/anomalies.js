@@ -1,19 +1,21 @@
 // This view consumes records only. Reason strings have no behavioral meaning.
 export const STREAMS = ['left_eef', 'right_eef', 'left_gripper', 'right_gripper'];
-export const containsTime = (record, ns) => record.start_ns === record.end_ns
-  ? ns === record.start_ns : record.start_ns <= ns && ns < record.end_ns;
+// Records address frames [start_frame, end_frame) of the 30 fps frame sequence.
+export const frameNs = frame => Math.round(frame * 1e9 / 30);
+export const containsTime = (record, ns) => frameNs(record.start_frame) <= ns && ns < frameNs(record.end_frame);
+// Records without a stream concern the whole episode and get a lane of their own.
+export const EPISODE_LANE = 'episode';
+const lane = record => record.stream ?? EPISODE_LANE;
 export function filterRecords(records, {episode = '', stream = '', reason = ''}) {
   return records.filter(record => (!episode || record.episode_id === episode) &&
-    (!stream || record.stream === stream) && (!reason || record.reason === reason));
+    (!stream || lane(record) === stream) && (!reason || record.reason === reason));
 }
-const decimalSeconds = ns => (ns / 1e9).toFixed(2);
-const seconds = ns => decimalSeconds(ns) + ' s';
-const interval = record => record.start_ns === record.end_ns ? seconds(record.start_ns)
-  : `[${seconds(record.start_ns)}, ${seconds(record.end_ns)})`;
-const label = record => `#${record.index} · ${record.episode_id} · ${record.stream} · ${record.reason} · ${interval(record)}`;
-const streamNames = {left_eef: 'Left end effector', right_eef: 'Right end effector',
+const frameSeconds = frame => (frame / 30).toFixed(2);
+const interval = record => `frames [${record.start_frame}, ${record.end_frame}) · ` +
+  `${frameSeconds(record.start_frame)}–${frameSeconds(record.end_frame)} s`;
+const label = record => `#${record.episode_index} · ${record.episode_id} · ${lane(record)} · ${record.reason} · ${interval(record)}`;
+const streamNames = {[EPISODE_LANE]: 'Whole episode', left_eef: 'Left end effector', right_eef: 'Right end effector',
   left_gripper: 'Left gripper', right_gripper: 'Right gripper'};
-const compactSeconds = decimalSeconds;
 
 export class AnomalyReview {
   constructor(root, marks, onJump) {
@@ -57,10 +59,11 @@ export class AnomalyReview {
   setReport(records) {
     this.root.hidden = records === null;
     this.records = (records || []).map((record, id) => ({...record, id}));
-    for (const [name, field] of [['episode', 'episode_id'], ['stream', 'stream'], ['reason', 'reason']]) {
+    for (const [name, field] of [['episode', record => record.episode_id], ['stream', lane],
+                                 ['reason', record => record.reason]]) {
       const select = this.get('anomaly-' + name);
       select.replaceChildren(new Option('All ' + name + 's', ''));
-      for (const value of new Set(this.records.map(record => record[field]))) {
+      for (const value of new Set(this.records.map(field))) {
         select.add(new Option(value, value));
       }
       select.disabled = !this.records.length;
@@ -74,7 +77,7 @@ export class AnomalyReview {
     const select = this.get('anomaly-record');
     select.replaceChildren(new Option(this.filtered.length ? 'Choose an anomaly…' : 'No anomalies', ''));
     for (const record of this.filtered) {
-      const option = new Option(`#${record.index} · ${streamNames[record.stream]} · ${record.reason} · ${compactSeconds(record.start_ns)} s`, String(record.id));
+      const option = new Option(`#${record.episode_index} · ${streamNames[lane(record)]} · ${record.reason} · ${frameSeconds(record.start_frame)} s`, String(record.id));
       option.title = label(record);
       select.add(option);
     }
@@ -97,16 +100,16 @@ export class AnomalyReview {
     this.get('anomaly-count').textContent = `${index < 0 ? '–' : index + 1} / ${this.filtered.length}`;
     const record = this.selected === null ? null : this.records[this.selected];
     this.get('anomaly-title').textContent = record
-      ? `${streamNames[record.stream]} · ${record.reason}`
+      ? `${streamNames[lane(record)]} · ${record.reason}`
       : !this.records.length ? 'No anomalies' : !this.filtered.length ? 'No matching anomalies' : 'Choose an anomaly to review';
     this.get('anomaly-timing').textContent = record
-      ? record.start_ns === record.end_ns ? `${compactSeconds(record.start_ns)} s · Point`
-        : `${compactSeconds(record.start_ns)}–${compactSeconds(record.end_ns)} s · Duration ${compactSeconds(record.end_ns - record.start_ns)} s`
+      ? `${frameSeconds(record.start_frame)}–${frameSeconds(record.end_frame)} s · ` +
+        `Duration ${frameSeconds(record.end_frame - record.start_frame)} s`
       : !this.records.length ? 'The report is empty.' : !this.filtered.length ? 'Try clearing the filters.' : 'Use Next or open the record list.';
     this.get('anomaly-details').hidden = !record;
     if (!record) this.get('anomaly-details').open = false;
     this.get('anomaly-detail').textContent = record
-      ? `Episode: ${record.episode_id}\nIndex: ${record.index}\nStream: ${record.stream}\nReason: ${record.reason}\nInterval: ${interval(record)}`
+      ? `Episode: ${record.episode_id}\nIndex: ${record.episode_index}\nStream: ${lane(record)}\nReason: ${record.reason}\nInterval: ${interval(record)}`
       : '';
     for (const [button, item] of this.markButtons) {
       button.setAttribute('aria-pressed', String(item.id === this.selected));
@@ -120,7 +123,7 @@ export class AnomalyReview {
     if (listWasOpen) this.get('anomaly-list').querySelector('summary').focus();
     this.selected = id;
     this.updateSelection();
-    this.onJump(record);
+    this.onJump(record, frameNs(record.start_frame));
   }
   step(direction) {
     const index = this.filtered.findIndex(record => record.id === this.selected);
@@ -140,8 +143,8 @@ export class AnomalyReview {
     this.markButtons = [];
     if (!this.episode) return;
     const records = this.filtered.filter(record => record.episode_id === this.episode.episode_id);
-    for (const stream of STREAMS) {
-      const items = records.filter(record => record.stream === stream);
+    for (const stream of [EPISODE_LANE, ...STREAMS]) {
+      const items = records.filter(record => lane(record) === stream);
       if (!items.length) continue;
       const row = document.createElement('div'); row.className = 'anomaly-lane';
       row.setAttribute('aria-label', stream + ' anomalies');
@@ -150,10 +153,11 @@ export class AnomalyReview {
       for (const record of items) {
         const button = document.createElement('button'); button.type = 'button';
         button.className = 'anomaly-mark';
+        // The timeline ends at the last frame's time; a record may end one frame after it.
         const end = Math.max(1, this.episode.end_ns);
-        button.style.left = Math.min(100, record.start_ns / end * 100) + '%';
-        button.style.width = Math.max(0, (record.end_ns - record.start_ns) / end * 100) + '%';
-        button.classList.toggle('point', record.start_ns === record.end_ns);
+        const left = Math.min(100, frameNs(record.start_frame) / end * 100);
+        button.style.left = left + '%';
+        button.style.width = Math.min(100 - left, (frameNs(record.end_frame) - frameNs(record.start_frame)) / end * 100) + '%';
         button.title = label(record); button.setAttribute('aria-label', label(record));
         button.setAttribute('aria-pressed', String(record.id === this.selected));
         button.addEventListener('click', () => this.select(record.id));
@@ -164,6 +168,6 @@ export class AnomalyReview {
   }
   activeStreams(ns) {
     return new Set(this.records.filter(record => record.episode_id === this.episode?.episode_id &&
-      containsTime(record, ns)).map(record => record.stream));
+      containsTime(record, ns)).flatMap(record => record.stream ? [record.stream] : STREAMS));
   }
 }

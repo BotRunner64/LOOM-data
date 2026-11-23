@@ -152,6 +152,5 @@ def expected_report(root, config=anomalies.Config()):
     dataset = contract.Dataset(Path(root))
     rows = []
     for episode in dataset.episodes:
-        streams, end_ns = anomalies.read_episode(dataset, episode)
-        rows += anomalies.detect_episode(episode['episode_index'], streams, end_ns, config)
+        rows += anomalies.detect_episode(episode['episode_index'], anomalies.read_episode(dataset, episode), config)
     return ''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in rows)
