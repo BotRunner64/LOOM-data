@@ -99,10 +99,10 @@ class BetaMappingTests(unittest.TestCase):
         for side in ('left', 'right'):
             np.testing.assert_allclose(poses[f'{side}_eef'][0][:3], [2,4,.2], atol=1e-12)
         np.testing.assert_allclose(poses['left_eef'][0][3:6], [0,0,1], atol=1e-12)
-        # Mounted palm backs are opposite in source flange coordinates.
-        for transform, sign in zip(transforms, (1,-1)):
-            np.testing.assert_allclose(transform[:3,2], [sign,0,0], atol=1e-12)
-            np.testing.assert_allclose(np.cross(transform[:3,2],transform[:3,0]),transform[:3,1])
+        # Columns are approach (+Z), finger separation (-X), and camera-side palm back (-Y).
+        expected_axes = [[0, -1, 0], [0, 0, -1], [1, 0, 0]]
+        for transform in transforms:
+            np.testing.assert_allclose(transform[:3, :3], expected_axes, atol=1e-12)
 
     def test_segment_boundaries_use_native_times_fill_gaps_and_reject_overlap(self):
         row = {'task_name': 'Whole task', 'label_info': {'action_config': [

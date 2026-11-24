@@ -23,11 +23,11 @@ REPO_ID = 'agibot-world/AgiBotWorld-Beta'
 CAMERAS = {'head_color.mp4': 'top',
            'hand_left_color.mp4': 'left_wrist',
            'hand_right_color.mp4': 'right_wrist'}
-# Recorded flange origin is the gripper mounting datum; keep the tool axes.
+# The recorded flange origin is the gripper mounting datum.
 DEFAULT_EEF_OFFSET = (0., 0., 0.)
-# G1_120s installs its right gripper with a pi rotation about source flange Z.
-DEFAULT_LEFT_TOOL_RPY = (math.pi, -math.pi / 2, 0.)
-DEFAULT_RIGHT_TOOL_RPY = (math.pi, -math.pi / 2, math.pi)
+# In both recorded flange frames, the fingers extend along +Z and the wrist camera sits on -Y.
+DEFAULT_LEFT_TOOL_RPY = (math.pi / 2, -math.pi / 2, 0.)
+DEFAULT_RIGHT_TOOL_RPY = DEFAULT_LEFT_TOOL_RPY
 # Measured values increase when the gripper closes, verified with wrist RGB
 # and control transitions. These nominal endpoints are not tip-width mm.
 DEFAULT_GRIPPER_OPEN = 35.
