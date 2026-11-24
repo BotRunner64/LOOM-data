@@ -3,17 +3,19 @@ from fractions import Fraction
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import av
 import numpy as np
 
 from support import IDENTITY_POSE, check, make_dataset
 from loom_data import contract, resumable
-from loom_data.check import anomalies, clean as script
+from loom_data.check import anomalies, clean as script, job as check_job
 from loom_data.contract import STATE_SLICES
 
 LEFT, RIGHT_GRIPPER = STATE_SLICES['left_eef'], STATE_SLICES['right_gripper'].start
@@ -186,16 +188,27 @@ class VideoTests(unittest.TestCase):
             script.copy_frames(source, self.directory / 'long.mp4', 12, 41)
 
 
+def tree(*roots):
+    """Relative path and size of every file under the given directories."""
+    return [(str(path.relative_to(root.parent)), path.stat().st_size)
+            for root in roots for path in sorted(root.rglob('*')) if path.is_file()]
+
+
+def decoded(path):
+    with av.open(str(path)) as reader:
+        return [frame.to_ndarray(format='rgb24') for frame in reader.decode(video=0)]
+
+
 class CleanDatasetTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(temp.cleanup)
         cls.parent = Path(temp.name).resolve()
-        cls.root = cls.parent / 'source'
+        cls.template = cls.parent / 'template'
         spiky = np.zeros(120)
         spiky[60:62] = .2
-        cls.source = make_dataset(cls.root, {
+        source = make_dataset(cls.template, {
             'busy': {'right_gripper': busy(120)},
             'static': {'right_gripper': np.zeros(151)},
             'trim': {'right_gripper': steps(400, 150, 250), 'tasks': ['reach'] * 200 + ['place'] * 200},
@@ -203,42 +216,77 @@ class CleanDatasetTests(unittest.TestCase):
             'spike': {'left_eef': arm(spiky), 'right_gripper': busy(120)},
             'glitchy': {'left_eef': arm(spikes(120, 10, 20, 30, 40, 50, 60)), 'right_gripper': busy(120)},
         }, cameras=('top', 'left_wrist'))
-        cls.output = cls.parent / 'cleaned'
-        cls.summary = script.clean(cls.root, cls.output)
-        cls.cleaned = contract.Dataset(cls.output)
+        # What the dataset held before it is cleaned in place.
+        cls.cameras, cls.info = source.cameras, source.info
+        cls.stats = json.loads((cls.template / 'meta/stats.json').read_text())
+        cls.frames = {e['episode_id']: source.frames(e) for e in source.episodes}
+        cls.videos = {(e['episode_id'], camera): decoded(source.video(e, camera)[0])
+                      for e in source.episodes if e['episode_id'] in ('trim', 'spike') for camera in source.cameras}
+        cls.root = cls.copy('dataset')
+        cls.removed = cls.parent / 'dataset.removed'
+        cls.report = check(cls.root)
+        cls.stale = check_job.work_directory(cls.root / 'anomalies.jsonl')
+        cls.stale_existed = cls.stale.is_dir()
+        cls.summary = script.clean(cls.root)
+        cls.cleaned, cls.originals = contract.Dataset(cls.root), contract.Dataset(cls.removed)
 
-    def source_episode(self, episode_id):
-        return next(e for e in self.source.episodes if e['episode_id'] == episode_id)
+    @classmethod
+    def copy(cls, name):
+        return Path(shutil.copytree(cls.template, cls.parent / name))
 
-    def cleaned_episode(self, episode_id):
-        return next(e for e in self.cleaned.episodes if e['episode_id'] == episode_id)
+    def episode(self, dataset, episode_id):
+        return next(e for e in dataset.episodes if e['episode_id'] == episode_id)
 
-    def decoded(self, dataset, episode, camera):
-        with av.open(str(dataset.video(episode, camera)[0])) as reader:
-            return [frame.to_ndarray(format='rgb24') for frame in reader.decode(video=0)]
+    def log(self):
+        return [json.loads(line) for line in (self.removed / script.LOG).read_text().splitlines()]
 
-    def test_dropped_episodes_are_left_out_and_the_rest_renumbered(self):
+    def test_dataset_is_cleaned_in_place_and_renumbered(self):
         self.assertEqual([(e['episode_index'], e['episode_id']) for e in self.cleaned.episodes],
                          [(0, 'busy'), (1, 'trim'), (2, 'spike')])
-        start = self.cleaned_range('trim')[0]
+        start = next(e for e in self.log() if e['episode_id'] == 'trim')['start_frame']
         self.assertEqual(self.summary, {
-            'episodes': 6, 'kept': 3, 'repaired_episodes': 1, 'repaired_spikes': 1, 'trimmed_episodes': 1,
-            'removed_frames': 400 - (280 - start), 'dropped': 3, 'dropped_boundary_idle': 1,
-            'dropped_internal_idle': 1, 'dropped_eef_spike': 1})
-        self.assertEqual(self.cleaned.info['total_episodes'], 3)
+            'episodes': 6, 'changed': 5, 'removed': str(self.removed), 'kept': 3, 'repaired_episodes': 1,
+            'repaired_spikes': 1, 'trimmed_episodes': 1, 'removed_frames': 400 - (280 - start), 'dropped': 3,
+            'dropped_boundary_idle': 1, 'dropped_internal_idle': 1, 'dropped_eef_spike': 1})
         self.assertEqual(self.cleaned.info['total_frames'], 120 + (280 - start) + 120)
-        self.assertEqual(self.cleaned.info['robot_type'], self.source.info['robot_type'])
-        self.assertEqual(self.cleaned.cameras, self.source.cameras)
+        self.assertEqual(self.cleaned.info['robot_type'], self.info['robot_type'])
+        self.assertEqual(self.cleaned.cameras, self.cameras)
+        # Video files follow the new episode numbering and nothing else is left behind.
+        for camera in self.cameras:
+            directory = self.root / 'videos' / contract.video_key(camera) / 'chunk-000'
+            self.assertEqual(sorted(p.name for p in directory.iterdir()),
+                             ['file-000.mp4', 'file-001.mp4', 'file-002.mp4'])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ['data', 'meta', 'videos'])
+        self.assertFalse(resumable.work_directory(self.root, '.clean-work').exists())
 
-    def cleaned_range(self, episode_id):
-        log = [json.loads(line) for line in (self.output / script.LOG).read_text().splitlines()]
-        entry = next(e for e in log if e['episode_id'] == episode_id)
-        return entry['start_frame'], entry['end_frame']
+    def test_originals_of_every_dropped_or_changed_episode_form_a_dataset(self):
+        self.assertEqual([e['episode_id'] for e in self.originals.episodes],
+                         ['static', 'trim', 'pause', 'spike', 'glitchy'])
+        self.assertEqual(self.originals.info['robot_type'], self.info['robot_type'])
+        for episode in self.originals.episodes:
+            state, tasks = self.originals.frames(episode)
+            np.testing.assert_array_equal(state, self.frames[episode['episode_id']][0])
+            self.assertEqual(tasks, self.frames[episode['episode_id']][1])
+            for camera in self.cameras:
+                with av.open(str(self.originals.video(episode, camera)[0])) as reader:
+                    self.assertEqual(reader.streams.video[0].frames, episode['length'])
+        for key in self.videos:
+            original = decoded(self.originals.video(self.episode(self.originals, key[0]), key[1])[0])
+            self.assertTrue(all(np.array_equal(a, b) for a, b in zip(self.videos[key], original, strict=True)))
+        # The originals still show the anomalies; the cleaned dataset does not.
+        self.assertEqual(check(self.removed)[0], 5)
+        self.assertGreater(check(self.removed)[1], 5)
+        self.assertEqual(check(self.root, self.parent / 'cleaned.jsonl'), (3, 0))
+
+    def test_no_file_is_shared_between_or_within_the_datasets(self):
+        videos = [p for root in (self.root, self.removed) for p in root.rglob('*.mp4')]
+        self.assertEqual(len(videos), (3 + 5) * 2)
+        self.assertTrue(all(path.stat().st_nlink == 1 for path in videos))
+        self.assertEqual(len({(path.stat().st_dev, path.stat().st_ino) for path in videos}), len(videos))
 
     def test_log_lists_every_dropped_or_changed_episode(self):
-        log = [json.loads(line) for line in (self.output / script.LOG).read_text().splitlines()]
-        start = self.cleaned_range('trim')[0]
-        self.assertEqual(log, [
+        start = next(e for e in self.log() if e['episode_id'] == 'trim')['start_frame']
+        self.assertEqual(self.log(), [
             {'episode_id': 'static', 'source_episode_index': 1, 'action': 'dropped', 'reason': 'boundary_idle'},
             {'episode_id': 'trim', 'source_episode_index': 2, 'action': 'kept', 'repaired_spikes': 0,
              'start_frame': start, 'end_frame': 280},
@@ -248,89 +296,136 @@ class CleanDatasetTests(unittest.TestCase):
             {'episode_id': 'glitchy', 'source_episode_index': 5, 'action': 'dropped', 'reason': 'eef_spike'}])
 
     def test_trimmed_episode_keeps_state_instructions_and_exact_video_frames(self):
-        start, end = self.cleaned_range('trim')
+        entry = next(e for e in self.log() if e['episode_id'] == 'trim')
+        start, end = entry['start_frame'], entry['end_frame']
         # One second of idle is kept at each end; the head starts on a keyframe at or just before it.
         self.assertEqual(end, 280)
         self.assertIn(start, (119, 120))
-        source, cleaned = self.source_episode('trim'), self.cleaned_episode('trim')
+        cleaned = self.episode(self.cleaned, 'trim')
         self.assertEqual(cleaned['length'], end - start)
-        state, tasks = self.source.frames(source)
+        state, tasks = self.frames['trim']
         trimmed_state, trimmed_tasks = self.cleaned.frames(cleaned)
         np.testing.assert_array_equal(trimmed_state, state[start:end])
         self.assertEqual(trimmed_tasks, tasks[start:end])
         self.assertEqual(cleaned['tasks'], ['reach', 'place'])
-        for camera in self.cleaned.cameras:
+        for camera in self.cameras:
             path, first = self.cleaned.video(cleaned, camera)
             self.assertEqual(first, 0)
-            expected, copied = self.decoded(self.source, source, camera)[start:end], self.decoded(self.cleaned, cleaned, camera)
-            self.assertEqual(len(copied), end - start)
-            self.assertTrue(all(np.array_equal(a, b) for a, b in zip(expected, copied)))
+            copied = decoded(path)
+            self.assertTrue(all(np.array_equal(a, b)
+                                for a, b in zip(self.videos['trim', camera][start:end], copied, strict=True)))
             with av.open(str(path)) as reader:
                 self.assertEqual((reader.streams.video[0].frames, reader.streams.video[0].average_rate),
                                  (end - start, 30))
 
-    def test_unchanged_videos_are_linked_not_copied(self):
-        for episode_id in ('busy', 'spike'):
-            for camera in self.cleaned.cameras:
-                source = self.source.video(self.source_episode(episode_id), camera)[0]
-                cleaned = self.cleaned.video(self.cleaned_episode(episode_id), camera)[0]
-                self.assertTrue(os.path.samefile(source, cleaned))
-        np.testing.assert_array_equal(self.cleaned.frames(self.cleaned_episode('busy'))[0],
-                                      self.source.frames(self.source_episode('busy'))[0])
-
-    def test_spike_is_repaired_in_the_frame_table(self):
-        state = self.source.frames(self.source_episode('spike'))[0]
-        repaired = self.cleaned.frames(self.cleaned_episode('spike'))[0]
+    def test_spike_is_repaired_in_the_frame_table_and_keeps_its_video(self):
+        state = self.frames['spike'][0]
+        repaired = self.cleaned.frames(self.episode(self.cleaned, 'spike'))[0]
         np.testing.assert_allclose(state[60:62, 0], .2, atol=1e-6)
         np.testing.assert_allclose(repaired[:, LEFT], np.tile(IDENTITY_POSE, (120, 1)), atol=1e-7)
         np.testing.assert_array_equal(np.delete(repaired, np.r_[LEFT], axis=1), np.delete(state, np.r_[LEFT], axis=1))
+        np.testing.assert_array_equal(self.cleaned.frames(self.episode(self.cleaned, 'busy'))[0], self.frames['busy'][0])
+        for camera in self.cameras:
+            kept = decoded(self.cleaned.video(self.episode(self.cleaned, 'spike'), camera)[0])
+            self.assertTrue(all(np.array_equal(a, b) for a, b in zip(self.videos['spike', camera], kept, strict=True)))
 
     def test_statistics_are_recomputed_for_state_and_reused_for_images(self):
-        source = json.loads((self.root / 'meta/stats.json').read_text())
-        cleaned = json.loads((self.output / 'meta/stats.json').read_text())
-        total = self.cleaned.info['total_frames']
-        for camera in self.cleaned.cameras:
-            key = contract.video_key(camera)
-            self.assertEqual({name: cleaned[key][name] for name in ('min', 'max', 'mean', 'std')},
-                             {name: source[key][name] for name in ('min', 'max', 'mean', 'std')})
-            self.assertEqual(cleaned[key]['count'], [total])
-        self.assertEqual(cleaned[contract.STATE_KEY]['count'], [total])
-        # The repaired spike no longer shows in the state statistics.
-        self.assertAlmostEqual(source[contract.STATE_KEY]['max'][0], .2, places=6)
-        self.assertEqual(cleaned[contract.STATE_KEY]['max'][0], 0)
+        for root in (self.root, self.removed):
+            stats = json.loads((root / 'meta/stats.json').read_text())
+            total = contract.Dataset(root).info['total_frames']
+            for camera in self.cameras:
+                key = contract.video_key(camera)
+                self.assertEqual({name: stats[key][name] for name in ('min', 'max', 'mean', 'std')},
+                                 {name: self.stats[key][name] for name in ('min', 'max', 'mean', 'std')})
+                self.assertEqual(stats[key]['count'], [total])
+            self.assertEqual(stats[contract.STATE_KEY]['count'], [total])
+        # The repaired spike no longer shows in the state statistics of the cleaned dataset.
+        self.assertAlmostEqual(self.stats[contract.STATE_KEY]['max'][0], .2, places=6)
+        self.assertEqual(json.loads((self.root / 'meta/stats.json').read_text())[contract.STATE_KEY]['max'][0], 0)
 
-    def test_cleaned_dataset_has_no_anomalies_and_the_source_is_untouched(self):
-        self.assertEqual(check(self.output, self.parent / 'cleaned.jsonl'), (3, 0))
-        self.assertEqual(contract.Dataset(self.root).info, self.source.info)
-        self.assertEqual(len(contract.Dataset(self.root).episodes), 6)
-        self.assertFalse(resumable.work_directory(self.output, '.clean-work').exists())
+    def test_stale_anomaly_report_moves_out_with_its_recovery_state(self):
+        self.assertEqual(self.report[0], 6)
+        self.assertTrue(self.stale_existed)
+        self.assertFalse((self.root / 'anomalies.jsonl').exists())
+        self.assertFalse(self.stale.exists())
+        self.assertEqual(len((self.removed / script.OLD_REPORT).read_text().splitlines()), self.report[1])
 
-    def test_rejects_unsafe_outputs_and_publishes_nothing_on_failure(self):
-        for output, message in ((self.output, 'Output exists'), (self.root / 'cleaned', 'outside the source dataset'),
-                                (self.parent, 'Output exists')):
-            with self.subTest(output=output), self.assertRaisesRegex(ValueError, message):
-                script.clean(self.root, output)
-        output = self.parent / 'nothing'
-        with self.assertRaisesRegex(ValueError, 'Every episode was dropped'):
-            script.clean(self.root, output, max_spikes=0, config=replace(anomalies.Config(), max_internal_idle_s=0,
-                                                                         max_boundary_idle_s=0), keep_idle_s=0)
-        self.assertFalse(output.exists())
-        self.assertFalse(resumable.work_directory(output, '.clean-work').exists())
+    def test_a_cleaned_dataset_is_not_cleaned_again(self):
+        before = tree(self.root, self.removed)
+        with self.assertRaisesRegex(ValueError, 'Removed directory exists'):
+            script.clean(self.root)
+        # With its originals elsewhere, a second pass finds nothing left to clean.
+        self.assertIsNone(script.clean(self.root, self.parent / 'second.removed'))
+        self.assertFalse((self.parent / 'second.removed').exists())
+        self.assertEqual(tree(self.root, self.removed), before)
+
+    def test_rejects_unsafe_removed_directories_and_leaves_the_dataset_alone_on_failure(self):
+        root = self.copy('untouched')
+        before = tree(root)
+        for removed, message in ((root / 'removed', 'outside the dataset'), (self.parent, 'Removed directory exists')):
+            with self.subTest(removed=removed), self.assertRaisesRegex(ValueError, message):
+                script.clean(root, removed)
+        with self.assertRaisesRegex(ValueError, 'Every episode would be dropped'):
+            script.clean(root, max_spikes=0, keep_idle_s=0,
+                         config=replace(anomalies.Config(), max_internal_idle_s=0, max_boundary_idle_s=0))
+        with patch.object(script, 'copy_frames', side_effect=OSError('disk full')), self.assertRaises(OSError):
+            script.clean(root)
+        self.assertEqual(tree(root), before)
+        self.assertFalse(root.with_name('untouched.removed').exists())
+        self.assertFalse(resumable.work_directory(root, '.clean-work').exists())
+
+    def test_interrupted_replacement_is_finished_by_running_again(self):
+        expected = [(path.replace('dataset', 'crash', 1), size) for path, size in tree(self.root, self.removed)
+                    if not path.endswith(script.OLD_REPORT)]
+        moves = []
+        with patch.object(script, 'move', side_effect=lambda *args: moves.append(args) or os.rename(*args)):
+            script.clean(self.copy('count'))
+        # 16 videos, then three directory swaps and the removed directory.
+        self.assertEqual(len(moves), 16 + 7)
+        for crash_after in (0, 1, 9, 16, 17, 20, 22):
+            root = self.copy('crash')
+            done = []
+
+            def move(source, target):
+                if len(done) == crash_after:
+                    raise RuntimeError('power loss')
+                done.append(os.rename(source, target))
+
+            with self.subTest(crash_after=crash_after):
+                with patch.object(script, 'move', side_effect=move), self.assertRaisesRegex(RuntimeError, 'power loss'):
+                    script.clean(root)
+                # Any arguments finish the interrupted run; they are not applied anew.
+                summary = script.clean(root, max_spikes=0)
+                self.assertTrue(summary.pop('resumed'))
+                self.assertEqual(summary, {**self.summary, 'removed': str(root.with_name('crash.removed'))})
+                self.assertEqual(tree(root, root.with_name('crash.removed')), expected)
+                self.assertEqual(check(root), (3, 0))
+                self.assertFalse(resumable.work_directory(root, '.clean-work').exists())
+            shutil.rmtree(root)
+            shutil.rmtree(root.with_name('crash.removed'))
+            shutil.rmtree(check_job.work_directory(root / 'anomalies.jsonl'), ignore_errors=True)
 
     def test_cli_and_threshold_overrides(self):
-        output = self.parent / 'cli'
-        result = subprocess.run([sys.executable, '-m', 'loom_data', 'clean', str(self.root), '--output', str(output),
-                                 '--max-spikes', '6', '--max-internal-idle-s', '13', '--keep-idle-s', '0'],
-                                capture_output=True, text=True, env=dict(os.environ, LOOM_DATA_NO_PROGRESS='1'))
+        root, removed = self.copy('cli'), self.parent / 'elsewhere'
+        command = [sys.executable, '-m', 'loom_data', 'clean', str(root), '--max-spikes', '6',
+                   '--max-internal-idle-s', '13', '--keep-idle-s', '0.5', '--removed']
+        result = subprocess.run([*command, str(removed)], capture_output=True, text=True,
+                                env=dict(os.environ, LOOM_DATA_NO_PROGRESS='1'))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Kept 5 of 6 episodes: repaired 7 spikes in 2, trimmed 1 (', result.stdout)
         self.assertIn('Dropped 1: 1 boundary_idle, 0 internal_idle, 0 eef_spike', result.stdout)
-        self.assertEqual([e['episode_id'] for e in contract.Dataset(output).episodes],
+        self.assertIn(f'Originals of 4 episodes: {removed}', result.stdout)
+        self.assertEqual([e['episode_id'] for e in contract.Dataset(root).episodes],
                          ['busy', 'trim', 'pause', 'spike', 'glitchy'])
-        result = subprocess.run([sys.executable, '-m', 'loom_data', 'clean', str(self.root), '--output', str(output)],
-                                capture_output=True, text=True)
+        self.assertEqual([e['episode_id'] for e in contract.Dataset(removed).episodes],
+                         ['static', 'trim', 'spike', 'glitchy'])
+        result = subprocess.run([*command, str(removed)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
-        self.assertIn('Error: Output exists', result.stderr)
+        self.assertIn('Error: Removed directory exists', result.stderr)
+        result = subprocess.run([*command, str(self.parent / 'other')], capture_output=True, text=True,
+                                env=dict(os.environ, LOOM_DATA_NO_PROGRESS='1'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Nothing to clean; the dataset is unchanged', result.stdout)
 
 
 if __name__ == '__main__':

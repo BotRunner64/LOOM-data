@@ -372,12 +372,17 @@ def write_tasks(path, tasks):
                                          pa.array(list(tasks), type=pa.string())], schema=schema), path)
 
 
-def build_dataset(root, robot_type, episodes, progress=None, image_stats=None):
+def link_video(directory, camera, target):
+    link(directory / f'{camera}.mp4', target)
+
+
+def build_dataset(root, robot_type, episodes, progress=None, image_stats=None, place=link_video):
     """Assemble staged episodes sharing one layout into a LeRobot v3.0 dataset at `root`.
 
     `episodes` is the ordered list of (record, staged directory). Frame tables
     are merged into shared data files. Each episode keeps its own video file,
-    so staged MP4s are linked in place without re-encoding.
+    so staged MP4s are linked in place without re-encoding. `place(staged
+    directory, camera, target)` overrides how a video reaches its path in the dataset.
 
     Image statistics are accumulated from each record's `image_stats`, unless
     `image_stats` gives them ready-made: video key -> {min, max, mean, std}.
@@ -426,7 +431,7 @@ def build_dataset(root, robot_type, episodes, progress=None, image_stats=None):
             for camera in cameras:
                 key = video_key(camera)
                 chunk, file = episode_index // CHUNK_SIZE, episode_index % CHUNK_SIZE
-                link(directory / f'{camera}.mp4', root / VIDEO_PATH.format(
+                place(directory, camera, root / VIDEO_PATH.format(
                     video_key=key, chunk_index=chunk, file_index=file))
                 row.update({f'videos/{key}/chunk_index': chunk, f'videos/{key}/file_index': file,
                             f'videos/{key}/from_timestamp': 0., f'videos/{key}/to_timestamp': length / FPS})

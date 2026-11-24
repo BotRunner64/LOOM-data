@@ -22,7 +22,7 @@ loom-data download hifi_umi select --count 5      # 选一个小样本
 loom-data download hifi_umi download              # 下载到 dataset/raw/
 loom-data convert run --dataset hifi_umi --workers 8   # 转换到 dataset/export/
 loom-data check run dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480 --workers 8   # 检测异常
-loom-data clean dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480 --output dataset/export/HiFi-UMI-2K-clean/top+left_wrist+right_wrist_640x480   # 处理异常，写出新数据集
+loom-data clean dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480   # 处理异常，原地清理
 loom-data view dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480   # 在浏览器里查看
 ```
 
