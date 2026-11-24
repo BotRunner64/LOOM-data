@@ -22,6 +22,7 @@ loom-data download hifi_umi select --count 5      # 选一个小样本
 loom-data download hifi_umi download              # 下载到 dataset/raw/
 loom-data convert run --dataset hifi_umi --workers 8   # 转换到 dataset/export/
 loom-data check run dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480 --workers 8   # 检测异常
+loom-data clean dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480 --output dataset/export/HiFi-UMI-2K-clean/top+left_wrist+right_wrist_640x480   # 处理异常，写出新数据集
 loom-data view dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480   # 在浏览器里查看
 ```
 
@@ -46,6 +47,6 @@ loom-data view dataset/export/HiFi-UMI-2K/top+left_wrist+right_wrist_640x480   #
 ## 文档
 
 - [导出契约](docs/contract/export-contract.md)：导出数据包含什么、如何表示、如何存储。
-- [异常检测契约](docs/contract/anomaly-contract.md)：异常检测的规则、阈值和报告格式。
+- [异常检测契约](docs/contract/anomaly-contract.md)：异常检测的规则、阈值、报告格式和处理办法。
 - [使用说明](docs/usage.md)：所有命令的用法。
 - [开发说明](docs/development.md)：代码结构，以及如何新增数据源。

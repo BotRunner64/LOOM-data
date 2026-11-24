@@ -8,6 +8,7 @@ COMMANDS = {
     'download': ('loom_data.download', 'download a small pinned subset of a source dataset'),
     'convert': ('loom_data.convert.job', 'convert a source dataset to the export contract'),
     'check': ('loom_data.check.job', 'detect anomalies in an exported dataset'),
+    'clean': ('loom_data.check.clean', 'write a copy of an exported dataset with its anomalies handled'),
     'stats': ('loom_data.check.dataset_stats', 'episode counts and durations of exported datasets'),
     'anomaly-stats': ('loom_data.check.anomaly_stats', 'summarize anomaly reports'),
     'view': ('loom_data.viewer.server', 'browse an exported dataset in the browser'),

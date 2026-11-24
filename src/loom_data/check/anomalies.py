@@ -83,9 +83,8 @@ class StateStream:
                             config.openness_tolerance)
 
 
-def read_episode(dataset, episode):
-    """The four state streams of one episode of a `contract.Dataset`."""
-    state, _ = dataset.frames(episode)
+def episode_streams(state):
+    """The four state streams of an episode's N x 26 state."""
     streams = {}
     for name in STATE_NAMES:
         values = state[:, STATE_SLICES[name]]
@@ -94,12 +93,27 @@ def read_episode(dataset, episode):
     return streams
 
 
+def read_episode(dataset, episode):
+    """The four state streams of one episode of a `contract.Dataset`."""
+    return episode_streams(dataset.frames(episode)[0])
+
+
 def moved(streams, frames, reference, config):
     """Per frame: whether any stream changed relative to frame `reference`."""
     result = False
     for stream in streams.values():
         result = result | stream.changed(frames, reference, config)
     return result
+
+
+def boundary_idle(streams, count, config):
+    """(head, tail): nothing moved in frames [0, head) since the first frame, nor in
+    [tail, count) relative to the last one. An episode that never moved has head == count."""
+    frames = np.arange(count)
+    since_first = np.flatnonzero(moved(streams, frames, 0, config))
+    until_last = np.flatnonzero(moved(streams, frames, count - 1, config))
+    return (int(since_first[0]) if len(since_first) else count,
+            int(until_last[-1]) + 1 if len(until_last) else 0)
 
 
 def idle_segments(streams, count, config):
@@ -161,11 +175,7 @@ def detect_episode(index, streams, config=Config()):
         records.append(dict(episode_index=index, reason=reason, stream=stream,
                             start_frame=int(start), end_frame=int(end)))
 
-    frames = np.arange(count)
-    since_first = np.flatnonzero(moved(streams, frames, 0, config))
-    until_last = np.flatnonzero(moved(streams, frames, count - 1, config))
-    head = int(since_first[0]) if len(since_first) else count
-    tail = int(until_last[-1]) + 1 if len(until_last) else 0
+    head, tail = boundary_idle(streams, count, config)
     if head / FPS > config.max_boundary_idle_s:
         add('boundary_idle', 0, head)
     if head < count and (count - tail) / FPS > config.max_boundary_idle_s:

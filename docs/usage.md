@@ -6,6 +6,7 @@
 loom-data download       下载源数据集的小样本
 loom-data convert        把源数据集转换为导出格式
 loom-data check          在导出数据上检测异常
+loom-data clean          处理异常，写出清理后的数据集
 loom-data stats          统计导出数据集的 episode 数和时长
 loom-data anomaly-stats  汇总异常报告
 loom-data view           在浏览器里查看导出数据
@@ -171,6 +172,24 @@ loom-data check finalize dataset/export/ABC-130K/top+left_wrist+right_wrist_640x
 阈值固定在计划里。换阈值时用新的 `--output` 路径生成另一份报告。续跑状态在 `<报告路径>.anomaly-work`（导出目录下的报告对应 `dataset/work/` 里的同名路径）。
 
 检测规则更新后，旧的续跑状态和旧报告都不能沿用：工具会拒绝用旧计划续跑，viewer 和 `anomaly-stats` 也读不了旧格式的报告。删掉对应的 `.anomaly-work` 目录后重新检测，或用新的 `--output` 路径。
+
+## 处理异常
+
+```bash
+loom-data clean dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480 \
+    --output dataset/export/ABC-130K-clean/top+left_wrist+right_wrist_640x480
+```
+
+按[异常检测契约](contract/anomaly-contract.md)处理一个布局数据集，写出一个新数据集：修复 EEF 尖峰，丢弃有中段静止或尖峰过多的 episode，裁剪首尾静止。原数据集只读，不会被改动。
+
+- 处理自己重新检测，不读 `anomalies.jsonl`。阈值参数和 `check run` 相同；另有 `--keep-idle-s`（裁剪后每端保留的静止，默认 1 秒）和 `--max-spikes`（尖峰超过这个数就丢弃，默认 5）。
+- 视频不重新编码。没有裁剪的 episode 直接硬链接原视频；裁剪的 episode 拷贝保留帧的码流，画面与原视频逐像素一致。
+- 码流只能从关键帧切开，所以开头的裁剪点取「保留 1 秒」处或之前、各路相机都是关键帧的最近一帧。多数情况下多留 0 到 1 帧；各路相机的关键帧一直错开时会多留一些，最多退到不裁开头。
+- `stats.json` 里 state 等统计量重新计算；图像统计量沿用原数据集的估计值。
+- 新数据集里的 `cleaning.jsonl` 记录每个被丢弃或被改动的 episode：丢弃的原因，或修复的尖峰数和保留的帧区间。没有改动的 episode 不记录。
+- 输出目录必须不存在。单进程运行，中断后重跑会从头开始。
+
+处理后可以对新数据集再跑一次 `check run`，确认异常已经消除。
 
 ## 统计
 

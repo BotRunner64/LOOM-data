@@ -206,13 +206,20 @@ def write_frames(destination, streams, instructions, origin, grid=None):
     state = np.empty((len(frame_times), STATE_DIM), dtype=np.float32)
     for name, data in columns.items():
         state[:, STATE_SLICES[name]] = data.reshape(len(frame_times), -1)
+    write_frame_table(destination, state, frame_tasks(instructions, frame_times - int(origin)))
+    return len(frame_times)
+
+
+def write_frame_table(destination, state, tasks):
+    """Write frames.parquet of a staged episode: N x 26 state and the instruction text of each frame."""
+    state = np.asarray(state, dtype=np.float32)
     check_state(state)
-    tasks = frame_tasks(instructions, frame_times - int(origin))
+    if len(tasks) != len(state):
+        raise ValueError('Expected one instruction per frame')
     destination.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_arrays(
         [pa.FixedSizeListArray.from_arrays(pa.array(state.reshape(-1), type=pa.float32()), STATE_DIM),
          pa.array(tasks, type=pa.string())], schema=FRAME_SCHEMA), destination / FRAMES)
-    return len(frame_times)
 
 
 def episode_record(episode_id, length, videos, repairs=None):
@@ -365,12 +372,15 @@ def write_tasks(path, tasks):
                                          pa.array(list(tasks), type=pa.string())], schema=schema), path)
 
 
-def build_dataset(root, robot_type, episodes, progress=None):
+def build_dataset(root, robot_type, episodes, progress=None, image_stats=None):
     """Assemble staged episodes sharing one layout into a LeRobot v3.0 dataset at `root`.
 
     `episodes` is the ordered list of (record, staged directory). Frame tables
     are merged into shared data files. Each episode keeps its own video file,
     so staged MP4s are linked in place without re-encoding.
+
+    Image statistics are accumulated from each record's `image_stats`, unless
+    `image_stats` gives them ready-made: video key -> {min, max, mean, std}.
     """
     record = episodes[0][0]
     cameras, sizes = record['cameras'], record['sizes']
@@ -420,8 +430,9 @@ def build_dataset(root, robot_type, episodes, progress=None):
                     video_key=key, chunk_index=chunk, file_index=file))
                 row.update({f'videos/{key}/chunk_index': chunk, f'videos/{key}/file_index': file,
                             f'videos/{key}/from_timestamp': 0., f'videos/{key}/to_timestamp': length / FPS})
-                image = record['image_stats'][camera]
-                moments[key].add(image['min'], image['max'], image['sum'], image['sumsq'], image['count'])
+                if image_stats is None:
+                    image = record['image_stats'][camera]
+                    moments[key].add(image['min'], image['max'], image['sum'], image['sumsq'], image['count'])
             rows.append(row)
             index += length
             file_rows += length
@@ -437,10 +448,13 @@ def build_dataset(root, robot_type, episodes, progress=None):
         pq.write_table(pa.Table.from_pylist(rows[start:start + EPISODE_FILE_ROWS]), path)
     write_tasks(root / 'meta/tasks.parquet', tasks)
     stats = {name: value.result((3, 1, 1) if name.startswith('observation.images.') else None)
-             for name, value in moments.items()}
+             for name, value in moments.items() if value.count}
     for camera in cameras:
+        key = video_key(camera)
+        if image_stats is not None:
+            stats[key] = {name: image_stats[key][name] for name in ('min', 'max', 'mean', 'std')}
         # Image statistics are sampled per pixel; LeRobot counts images. Quantiles are not computed.
-        stats[video_key(camera)]['count'] = [index]
+        stats[key]['count'] = [index]
     (root / 'meta/stats.json').write_text(json.dumps(stats, indent=2) + '\n', encoding='utf-8')
     info = {'codebase_version': 'v3.0', 'robot_type': robot_type, 'total_episodes': len(rows),
             'total_frames': index, 'total_tasks': len(tasks), 'chunks_size': CHUNK_SIZE,
