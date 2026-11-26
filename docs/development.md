@@ -14,6 +14,7 @@ src/loom_data/
 ├── sources/          每个数据源一个模块，实现统一接口
 ├── convert/          转换作业：配置、计划、worker、发布
 ├── check/            异常规则、检测作业、异常处理、统计
+├── pack.py           把导出视频打包成大文件（打包格式契约）
 ├── download/         从 Hugging Face 下载子集
 ├── robot/            URDF、正运动学、模型工具
 └── viewer/           查看导出数据的本地网页
@@ -26,7 +27,7 @@ src/loom_data/
 - `convert/job.py` 只负责计划、续跑和发布，不包含任何数据源的知识。
 - `check/` 和 `viewer/` 只读导出数据，不依赖 `sources/`。
 
-[导出契约](contract/export-contract.md)是项目的核心，格式的任何调整都先改那份文档，再改 `contract.py`。异常检测同理：规则、阈值、报告格式或处理办法的调整先改[异常检测契约](contract/anomaly-contract.md)，再改 `check/anomalies.py` 和 `check/clean.py`。
+[导出契约](contract/export-contract.md)是项目的核心，格式的任何调整都先改那份文档，再改 `contract.py`。异常检测同理：规则、阈值、报告格式或处理办法的调整先改[异常检测契约](contract/anomaly-contract.md)，再改 `check/anomalies.py` 和 `check/clean.py`。打包格式同理：先改[打包格式契约](contract/packed-contract.md)，再改 `pack.py`。
 
 ## 可续跑作业
 

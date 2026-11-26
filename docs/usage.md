@@ -7,6 +7,7 @@ loom-data download       下载源数据集的小样本
 loom-data convert        把源数据集转换为导出格式
 loom-data check          在导出数据上检测异常
 loom-data clean          处理异常，原地清理数据集
+loom-data pack           把导出数据集的视频打包成大文件，供训练读取
 loom-data stats          统计导出数据集的 episode 数和时长
 loom-data anomaly-stats  汇总异常报告
 loom-data view           在浏览器里查看导出数据
@@ -26,6 +27,7 @@ dataset/manifests/         下载清单
 dataset/raw/<数据集名>/     源数据
 dataset/export/<数据集名>/<布局名>/  导出数据：每个相机布局一个 LeRobot v3.0 数据集
 dataset/removed/<数据集名>/<布局名>/  清理异常时被丢弃或被改动的 episode 的原件
+dataset/packed/<数据集名>/<布局名>/   导出数据的打包视频
 dataset/work/              转换、检测和清理的工作目录
 assets/robot_models/       机器人模型
 ```
@@ -197,6 +199,20 @@ loom-data clean dataset/export/ABC-130K/top+left_wrist+right_wrist_640x480
 - 数据集、`dataset/work/` 和 `removed` 目录要在同一个文件系统上。
 
 清理后可以再跑一次 `check run`，确认异常已经消除。
+
+## 打包
+
+```bash
+loom-data pack dataset/export/ABC-130K --workers 8
+```
+
+把导出数据集的视频按[打包格式契约](contract/packed-contract.md)打包成少量大文件，并记下每一帧的位置。训练按帧随机读取时，不再需要逐个打开 MP4，在网络文件系统上快得多。码流原样拷贝，不解码也不重新编码，所以打包数据和导出视频一样大，解码结果逐像素一致。
+
+- 路径可以是一个布局数据集、一个源的目录或导出根目录，每个布局单独打包。
+- 打包数据和导出数据分开存放：`dataset/export/<数据集名>/<布局名>` 打包到 `dataset/packed/<数据集名>/<布局名>`。导出数据不在 `dataset/export/` 下时用 `--output` 指定打包根目录，每个布局写到 `<打包根>/<源>/<布局>`。
+- 导出数据是权威来源，打包数据是它的副本。导出数据改过（例如清理异常）以后，旧的打包数据作废：命令会拒绝在上面续打，删掉后重新打包即可。
+- 中断后重跑同一条命令即可续跑，已经写完的分片不重写。多台机器可以同时对同一个数据集运行这条命令，自动分摊分片；所有分片写完后，最后完成的那台写出索引。
+- `--workers` 默认取本机可用的 CPU 数。打包主要耗在读写文件上，2 核机器约 400 MB/s。
 
 ## 统计
 
